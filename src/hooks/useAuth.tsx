@@ -99,7 +99,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         | "offline"
         | "away"
         | "dnd") ?? "online",
-      avatarUrl: (targetUser?.user_metadata?.avatar_url as string) ?? "",
+      avatarUrl: "",
       about: (targetUser?.user_metadata?.about as string) ?? "",
       pushToTalkEnabled:
         (targetUser?.user_metadata?.push_to_talk_enabled as boolean) ?? false,

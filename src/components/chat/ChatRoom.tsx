@@ -166,6 +166,10 @@ export default function ChatRoom({
                   src={displayAvatar}
                   alt={displayName}
                   className="w-full h-full object-cover rounded-xl"
+                  onError={(e) => {
+                    e.currentTarget.style.display = "none";
+                    e.currentTarget.parentElement!.textContent = displayName.charAt(0).toUpperCase();
+                  }}
                 />
               ) : (
                 displayName.charAt(0).toUpperCase()

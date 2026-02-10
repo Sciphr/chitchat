@@ -224,6 +224,13 @@ export default function Settings({ onClose }: SettingsProps) {
                       src={form.avatarUrl}
                       alt={form.username}
                       className="profile-card-avatar"
+                      onError={(e) => {
+                        e.currentTarget.style.display = "none";
+                        const span = document.createElement("span");
+                        span.className = "profile-card-initial";
+                        span.textContent = form.username.charAt(0).toUpperCase();
+                        e.currentTarget.parentElement!.appendChild(span);
+                      }}
                     />
                   ) : (
                     <span className="profile-card-initial">
@@ -500,11 +507,8 @@ export default function Settings({ onClose }: SettingsProps) {
           className="settings-modal-window"
           onClick={(e) => e.stopPropagation()}
         >
-          <div className="relative bg-[var(--bg-primary)] profile-page settings-modal-body">
-            <div className="absolute inset-0 app-bg" />
-            <div className="relative z-10 w-full flex items-center justify-center py-10">
-              {content}
-            </div>
+          <div className="settings-modal-scroll">
+            {content}
           </div>
         </div>
       </div>

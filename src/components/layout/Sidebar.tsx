@@ -1,5 +1,15 @@
 import { useState } from "react";
-import type { Room } from "../../types";
+import type { Room, VoiceControls } from "../../types";
+import {
+  Mic,
+  MicOff,
+  Headphones,
+  HeadphoneOff,
+  Video,
+  VideoOff,
+  MonitorUp,
+  PhoneOff,
+} from "lucide-react";
 
 interface SidebarProps {
   rooms: Room[];
@@ -15,6 +25,7 @@ interface SidebarProps {
   >;
   onOpenSettings: () => void;
   onSignOut: () => void;
+  voiceControls: VoiceControls | null;
 }
 
 export default function Sidebar({
@@ -28,6 +39,7 @@ export default function Sidebar({
   voiceParticipants,
   onOpenSettings,
   onSignOut,
+  voiceControls,
 }: SidebarProps) {
   const [newRoomName, setNewRoomName] = useState("");
   const [showCreate, setShowCreate] = useState(false);
@@ -66,29 +78,23 @@ export default function Sidebar({
     <>
       <aside className="flex flex-col w-72 h-full sidebar-panel">
         {/* Server header */}
-        <div className="px-5 pt-5 pb-4 border-b border-[var(--border)] bg-[var(--bg-primary)]/40">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-2xl bg-[var(--bg-tertiary)] border border-[var(--border)] flex items-center justify-center shadow-[0_10px_30px_-20px_rgba(124,106,255,0.6)]">
-                <span className="text-[var(--accent)] font-bold heading-font">
-                  CC
-                </span>
+        <div className="sidebar-header">
+          <div className="sidebar-header-row">
+            <div className="sidebar-header-brand">
+              <div className="sidebar-header-logo">
+                <span className="heading-font">CC</span>
               </div>
               <div>
-                <h1 className="text-lg font-bold text-[var(--text-primary)] heading-font tracking-tight">
-                  ChitChat
-                </h1>
-                <div className="flex items-center gap-2">
-                  <span className="inline-block w-2 h-2 rounded-full bg-[var(--success)] shadow-[0_0_10px_rgba(52,211,153,0.6)]" />
-                  <p className="text-[11px] text-[var(--text-muted)] uppercase tracking-[0.12em]">
-                    Self-hosted
-                  </p>
+                <h1 className="sidebar-header-title heading-font">ChitChat</h1>
+                <div className="sidebar-header-subtitle">
+                  <span className="sidebar-header-dot" />
+                  <p className="sidebar-header-label">Self-hosted</p>
                 </div>
               </div>
             </div>
             <button
               onClick={openCreateModal}
-              className="w-9 h-9 rounded-xl bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-elevated)] text-xl leading-none cursor-pointer transition-colors"
+              className="sidebar-create-btn"
               title="Create channel"
             >
               +
@@ -158,7 +164,7 @@ export default function Sidebar({
       )}
 
       {/* Room lists */}
-      <div className="flex-1 overflow-y-auto py-4">
+      <div className="sidebar-rooms">
         {/* Text channels */}
         <div className="sidebar-section-title heading-font">Text Channels</div>
         {textRooms.map((room) => (
@@ -206,10 +212,57 @@ export default function Sidebar({
         ))}
       </div>
 
+      {/* Voice controls (when connected) */}
+      {voiceControls && (
+        <div className="sidebar-voice-controls">
+          <div className="sidebar-voice-controls-label">Voice Connected</div>
+          <div className="sidebar-voice-controls-buttons">
+            <button
+              onClick={voiceControls.toggleMute}
+              className={`sidebar-vc-btn ${voiceControls.isMuted ? "active" : ""}`}
+              title={voiceControls.isMuted ? "Unmute" : "Mute"}
+            >
+              {voiceControls.isMuted ? <MicOff size={18} /> : <Mic size={18} />}
+            </button>
+            <button
+              onClick={voiceControls.toggleDeafen}
+              className={`sidebar-vc-btn ${voiceControls.isDeafened ? "active" : ""}`}
+              title={voiceControls.isDeafened ? "Undeafen" : "Deafen"}
+            >
+              {voiceControls.isDeafened ? <HeadphoneOff size={18} /> : <Headphones size={18} />}
+            </button>
+            <button
+              onClick={voiceControls.toggleVideo}
+              className={`sidebar-vc-btn ${voiceControls.isCameraOn ? "active" : ""}`}
+              title={voiceControls.isCameraOn ? "Turn off camera" : "Turn on camera"}
+            >
+              {voiceControls.isCameraOn ? <Video size={18} /> : <VideoOff size={18} />}
+            </button>
+            <button
+              onClick={voiceControls.toggleScreenShare}
+              className={`sidebar-vc-btn ${voiceControls.isScreenSharing ? "active" : ""}`}
+              title={voiceControls.isScreenSharing ? "Stop sharing" : "Share screen"}
+            >
+              <MonitorUp size={18} />
+            </button>
+          </div>
+          <button
+            onClick={voiceControls.disconnect}
+            className="sidebar-vc-btn danger"
+            style={{ width: "100%" }}
+            title="Disconnect"
+          >
+            <PhoneOff size={16} />
+            <span>Disconnect</span>
+          </button>
+        </div>
+      )}
+
       {/* User panel at bottom */}
-      <div className="mx-3 mb-3 mt-1">
+      <div className="sidebar-user-panel">
         <div
-          className="sidebar-user flex items-center gap-3 cursor-pointer"
+          className="sidebar-user"
+          style={{ display: "flex", alignItems: "center", gap: "12px", cursor: "pointer" }}
           role="button"
           tabIndex={0}
           onClick={onOpenSettings}
@@ -221,34 +274,36 @@ export default function Sidebar({
           }}
           title="Edit profile"
         >
-          <div className="w-9 h-9 rounded-xl bg-[var(--accent)] flex items-center justify-center text-white text-sm font-bold overflow-hidden">
+          <div className="sidebar-user-avatar">
             {avatarUrl ? (
               <img
                 src={avatarUrl}
                 alt={username}
-                className="w-full h-full object-cover"
+                onError={(e) => {
+                  e.currentTarget.style.display = "none";
+                  e.currentTarget.parentElement!.textContent = username.charAt(0).toUpperCase();
+                }}
               />
             ) : (
               username.charAt(0).toUpperCase()
             )}
           </div>
-          <div className="flex-1 min-w-0">
-            <div className="text-sm font-medium truncate">{username}</div>
-            <div className="flex items-center gap-2 text-xs">
+          <div className="sidebar-user-info">
+            <div className="sidebar-user-name">{username}</div>
+            <div className="sidebar-user-status">
               <span
-                className="inline-block w-2 h-2 rounded-full"
+                className="sidebar-user-status-dot"
                 style={{ background: currentStatus.color }}
               />
-              <span className="text-[var(--text-muted)]">
+              <span className="sidebar-user-status-label">
                 {currentStatus.label}
               </span>
             </div>
           </div>
-          <span className="text-xs text-[var(--text-muted)]">Profile</span>
         </div>
         <button
           onClick={onSignOut}
-          className="mt-2 w-full text-xs py-2 rounded-xl border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--danger)] hover:border-[var(--danger)]/40 transition-colors"
+          className="sidebar-signout"
           title="Sign out"
         >
           Sign out

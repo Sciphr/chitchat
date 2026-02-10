@@ -9,7 +9,8 @@
       "Bash(npm:*)",
       "Bash(pnpm --version:*)",
       "Bash(npx @tauri-apps/cli:*)",
-      "Bash(npx tsc:*)"
+      "Bash(npx tsc:*)",
+      "Bash(node -e:*)"
     ]
   }
 }

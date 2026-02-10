@@ -6,7 +6,7 @@ import VoiceChannel from "../components/voice/VoiceChannel";
 import Settings from "./Settings";
 import { useSocket } from "../hooks/useSocket";
 import { useAuth } from "../hooks/useAuth";
-import type { Room } from "../types";
+import type { Room, VoiceControls } from "../types";
 
 export default function Home() {
   const navigate = useNavigate();
@@ -18,6 +18,7 @@ export default function Home() {
     Record<string, Array<{ id: string; name: string; isSpeaking: boolean }>>
   >({});
   const [showSettings, setShowSettings] = useState(false);
+  const [voiceControls, setVoiceControls] = useState<VoiceControls | null>(null);
 
   // Redirect to login if not authenticated
   useEffect(() => {
@@ -101,6 +102,7 @@ export default function Home() {
         voiceParticipants={voiceParticipants}
         onOpenSettings={() => setShowSettings(true)}
         onSignOut={handleSignOut}
+        voiceControls={voiceControls}
       />
 
         {/* Main content area */}
@@ -120,6 +122,7 @@ export default function Home() {
             <VoiceChannel
               room={activeRoom}
               onParticipantsChange={handleParticipantsChange}
+              onVoiceControlsChange={setVoiceControls}
             />
           )
             ) : (

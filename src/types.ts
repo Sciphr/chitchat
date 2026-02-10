@@ -13,6 +13,18 @@ export interface Room {
   created_at: string;
 }
 
+export interface VoiceControls {
+  isMuted: boolean;
+  isDeafened: boolean;
+  isCameraOn: boolean;
+  isScreenSharing: boolean;
+  toggleMute: () => void;
+  toggleDeafen: () => void;
+  toggleVideo: () => void;
+  toggleScreenShare: () => void;
+  disconnect: () => void;
+}
+
 export interface Message {
   id: string;
   room_id: string;

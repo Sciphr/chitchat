@@ -1,24 +1,25 @@
-import { useEffect, useMemo, useState } from "react";
-import type { Room } from "../../types";
+import { useEffect, useMemo, useState, useCallback, useRef } from "react";
+import type { Room, VoiceControls } from "../../types";
 import {
   LiveKitRoom,
   RoomAudioRenderer,
-  GridLayout,
-  ParticipantTile,
-  MediaDeviceSelect,
+  VideoTrack,
   useLocalParticipant,
   useRoomContext,
   useTracks,
   useParticipants,
   useIsSpeaking,
+  isTrackReference,
 } from "@livekit/components-react";
-import { Track, RoomEvent } from "livekit-client";
+import { Track, RoomEvent, RemoteAudioTrack } from "livekit-client";
 import { useAuth } from "../../hooks/useAuth";
 import { fetchLiveKitToken, getLiveKitUrl } from "../../lib/livekit";
+import { playJoin, playLeave, playMute, playUnmute, playDeafen, playUndeafen } from "../../lib/sounds";
 
 interface VoiceChannelProps {
   room: Room;
   onParticipantsChange?: (roomId: string, participants: VoiceParticipant[]) => void;
+  onVoiceControlsChange?: (controls: VoiceControls | null) => void;
 }
 
 interface VoiceParticipant {
@@ -31,27 +32,23 @@ function VoiceRoomContent({
   onLeave,
   pushToTalkEnabled,
   pushToTalkKey,
-  audioInputId,
-  audioOutputId,
-  videoInputId,
   roomId,
   onParticipantsChange,
+  onVoiceControlsChange,
 }: {
   onLeave: () => void;
   pushToTalkEnabled: boolean;
   pushToTalkKey: string;
-  audioInputId: string;
-  audioOutputId: string;
-  videoInputId: string;
   roomId: string;
   onParticipantsChange?: (roomId: string, participants: VoiceParticipant[]) => void;
+  onVoiceControlsChange?: (controls: VoiceControls | null) => void;
 }) {
   const room = useRoomContext();
-  const { isMicrophoneEnabled, isCameraEnabled } = useLocalParticipant();
+  const { isCameraEnabled } = useLocalParticipant();
   const participants = useParticipants();
   const tracks = useTracks(
     [
-      { source: Track.Source.Camera, withPlaceholder: true },
+      { source: Track.Source.Camera, withPlaceholder: false },
       { source: Track.Source.ScreenShare, withPlaceholder: false },
     ],
     { onlySubscribed: false },
@@ -59,6 +56,7 @@ function VoiceRoomContent({
 
   const [manualMute, setManualMute] = useState(false);
   const [deafened, setDeafened] = useState(false);
+  const [isScreenSharing, setIsScreenSharing] = useState(false);
 
   const formattedKey = useMemo(() => {
     if (!pushToTalkKey) return "Space";
@@ -68,6 +66,7 @@ function VoiceRoomContent({
     return pushToTalkKey;
   }, [pushToTalkKey]);
 
+  // Mic enable/disable based on mute/deafen/PTT
   useEffect(() => {
     if (!room) return;
 
@@ -82,13 +81,16 @@ function VoiceRoomContent({
     room.localParticipant.setMicrophoneEnabled(!manualMute && !deafened);
   }, [room, pushToTalkEnabled, manualMute, deafened]);
 
+  // Deafen volume control
   useEffect(() => {
     if (!room) return;
 
     function applyVolume(volume: number) {
       room.remoteParticipants.forEach((participant) => {
-        participant.audioTracks.forEach((pub) => {
-          pub.audioTrack?.setVolume(volume);
+        participant.getTrackPublications().forEach((pub) => {
+          if (pub.track instanceof RemoteAudioTrack) {
+            pub.track.setVolume(volume);
+          }
         });
       });
     }
@@ -97,7 +99,7 @@ function VoiceRoomContent({
     applyVolume(volume);
 
     function onTrackSubscribed(track: Track) {
-      if (track.kind === Track.Kind.Audio) {
+      if (track instanceof RemoteAudioTrack) {
         track.setVolume(volume);
       }
     }
@@ -108,6 +110,7 @@ function VoiceRoomContent({
     };
   }, [room, deafened]);
 
+  // Push-to-talk keyboard handler
   useEffect(() => {
     if (!room || !pushToTalkEnabled) return;
 
@@ -139,6 +142,8 @@ function VoiceRoomContent({
     };
   }, [room, pushToTalkEnabled, pushToTalkKey, manualMute, deafened]);
 
+  // Report participants upward + play join/leave sounds for remote participants
+  const prevCountRef = useRef(0);
   useEffect(() => {
     if (!onParticipantsChange) return;
     const mapped = participants.map((participant) => ({
@@ -147,124 +152,206 @@ function VoiceRoomContent({
       isSpeaking: participant.isSpeaking ?? false,
     }));
     onParticipantsChange(roomId, mapped);
+
+    const prevCount = prevCountRef.current;
+    const newCount = participants.length;
+    if (newCount > prevCount) playJoin();
+    else if (newCount < prevCount) playLeave();
+    prevCountRef.current = newCount;
   }, [participants, onParticipantsChange, roomId]);
 
-  function toggleMute() {
-    setManualMute((prev) => !prev);
-  }
+  // Sync screen share state when user stops sharing via browser UI
+  useEffect(() => {
+    if (!room) return;
+    function onTrackUnpublished(publication: { source?: Track.Source }) {
+      if (publication.source === Track.Source.ScreenShare) {
+        setIsScreenSharing(false);
+      }
+    }
+    room.localParticipant.on("localTrackUnpublished", onTrackUnpublished);
+    return () => {
+      room.localParticipant.off("localTrackUnpublished", onTrackUnpublished);
+    };
+  }, [room]);
 
-  function toggleVideo() {
+  const toggleMute = useCallback(() => {
+    setManualMute((prev) => {
+      if (prev) playUnmute();
+      else playMute();
+      return !prev;
+    });
+  }, []);
+
+  const toggleVideo = useCallback(() => {
     room.localParticipant.setCameraEnabled(!isCameraEnabled);
-  }
+  }, [room, isCameraEnabled]);
 
-  function toggleDeafen() {
-    setDeafened((prev) => !prev);
-  }
+  const toggleDeafen = useCallback(() => {
+    setDeafened((prev) => {
+      if (prev) playUndeafen();
+      else playDeafen();
+      return !prev;
+    });
+  }, []);
 
-  function handleLeave() {
+  const toggleScreenShare = useCallback(async () => {
+    try {
+      const newValue = !isScreenSharing;
+      await room.localParticipant.setScreenShareEnabled(newValue);
+      setIsScreenSharing(newValue);
+    } catch {
+      // User cancelled the screen picker dialog
+      setIsScreenSharing(false);
+    }
+  }, [room, isScreenSharing]);
+
+  const handleLeave = useCallback(() => {
+    playLeave();
     room.disconnect();
     onLeave();
-  }
+  }, [room, onLeave]);
+
+  // Report voice controls upward for the Sidebar
+  useEffect(() => {
+    if (!onVoiceControlsChange) return;
+    onVoiceControlsChange({
+      isMuted: manualMute,
+      isDeafened: deafened,
+      isCameraOn: isCameraEnabled ?? false,
+      isScreenSharing,
+      toggleMute,
+      toggleDeafen,
+      toggleVideo,
+      toggleScreenShare,
+      disconnect: handleLeave,
+    });
+  }, [
+    manualMute,
+    deafened,
+    isCameraEnabled,
+    isScreenSharing,
+    toggleMute,
+    toggleDeafen,
+    toggleVideo,
+    toggleScreenShare,
+    handleLeave,
+    onVoiceControlsChange,
+  ]);
+
+  // Filter screen share tracks (only actual track references, not placeholders)
+  const screenShareTracks = tracks
+    .filter((t) => t.source === Track.Source.ScreenShare)
+    .filter(isTrackReference);
+
+  const [expandedScreen, setExpandedScreen] = useState<string | null>(null);
+
+  // Calculate grid columns based on participant count
+  const count = participants.length;
+  const columns = count <= 1 ? 1 : count <= 4 ? 2 : count <= 9 ? 3 : 4;
 
   return (
     <div className="voice-room">
       <RoomAudioRenderer />
-      <div className="voice-layout">
-        <div className="voice-main">
-          <div className="voice-grid">
-            <GridLayout tracks={tracks} className="voice-grid-inner">
-              <ParticipantTile />
-            </GridLayout>
-          </div>
+
+      {/* Screen share thumbnails bar */}
+      {screenShareTracks.length > 0 && (
+        <div className="voice-screen-bar">
+          {screenShareTracks.map((trackRef) => {
+            const id = trackRef.participant.identity;
+            const name = trackRef.participant.name || id;
+            const isExpanded = expandedScreen === id;
+            return (
+              <div key={id + "-screen"} className="voice-screen-item">
+                <button
+                  className="voice-screen-thumb"
+                  onClick={() => setExpandedScreen(isExpanded ? null : id)}
+                  title={isExpanded ? "Close stream" : `Watch ${name}'s stream`}
+                >
+                  <VideoTrack trackRef={trackRef} />
+                  <span className="voice-screen-label">
+                    {name}{isExpanded ? " — Click to close" : " is sharing"}
+                  </span>
+                </button>
+                {isExpanded && (
+                  <div
+                    className="voice-screen-expanded"
+                    onClick={() => setExpandedScreen(null)}
+                  >
+                    <div
+                      className="voice-screen-expanded-inner"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <VideoTrack trackRef={trackRef} />
+                      <button
+                        className="voice-screen-close"
+                        onClick={() => setExpandedScreen(null)}
+                      >
+                        &times;
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
-        <div className="voice-side">
-          <div className="voice-card">
-            <div className="voice-card-title">Devices</div>
-            <div className="voice-device-group">
-              <div className="voice-device-label">Microphone</div>
-              <MediaDeviceSelect
-                kind="audioinput"
-                className="voice-device-list"
-                requestPermissions
-                initialSelection={audioInputId || undefined}
-              />
-            </div>
-            <div className="voice-device-group">
-              <div className="voice-device-label">Speakers</div>
-              <MediaDeviceSelect
-                kind="audiooutput"
-                className="voice-device-list"
-                requestPermissions
-                initialSelection={audioOutputId || undefined}
-              />
-            </div>
-            <div className="voice-device-group">
-              <div className="voice-device-label">Camera</div>
-              <MediaDeviceSelect
-                kind="videoinput"
-                className="voice-device-list"
-                requestPermissions
-                initialSelection={videoInputId || undefined}
-              />
-            </div>
-          </div>
-          <div className="voice-card">
-            <div className="voice-card-title">Participants</div>
-            <div className="voice-participants">
-              {participants.map((participant) => (
-                <ParticipantRow
-                  key={participant.identity}
-                  participant={participant}
-                />
-              ))}
-            </div>
-          </div>
-        </div>
+      )}
+
+      {/* Participant tile grid — fills available space */}
+      <div
+        className="voice-tile-grid"
+        style={{ gridTemplateColumns: `repeat(${columns}, 1fr)` }}
+      >
+        {participants.map((participant) => (
+          <ParticipantTileCard
+            key={participant.identity}
+            participant={participant}
+          />
+        ))}
       </div>
 
-      <div className="voice-controls">
-        <button onClick={handleLeave} className="voice-btn danger">
-          Leave
-        </button>
-        <button onClick={toggleMute} className={`voice-btn ${manualMute ? "active" : ""}`}>
-          {manualMute ? "Muted" : isMicrophoneEnabled ? "Mute" : "Unmuted"}
-        </button>
-        <button onClick={toggleDeafen} className={`voice-btn ${deafened ? "active" : ""}`}>
-          {deafened ? "Deafened" : "Deafen"}
-        </button>
-        <button onClick={toggleVideo} className={`voice-btn ${isCameraEnabled ? "active" : ""}`}>
-          {isCameraEnabled ? "Video on" : "Video off"}
-        </button>
-        {pushToTalkEnabled && (
-          <div className="voice-ptt">Hold {formattedKey} to talk</div>
-        )}
-      </div>
+      {pushToTalkEnabled && (
+        <div className="voice-ptt">Hold {formattedKey} to talk</div>
+      )}
     </div>
   );
 }
 
-function ParticipantRow({
+function ParticipantTileCard({
   participant,
 }: {
   participant: ReturnType<typeof useParticipants>[number];
 }) {
   const isSpeaking = useIsSpeaking(participant);
-  const isLocal = "isLocal" in participant && Boolean((participant as { isLocal?: boolean }).isLocal);
   const name = participant.name || participant.identity;
+  const cameraPub = participant.getTrackPublication(Track.Source.Camera);
+  const isCameraOn = cameraPub?.isSubscribed && !cameraPub.isMuted;
 
   return (
-    <div className={`voice-participant ${isSpeaking ? "speaking" : ""}`}>
-      <span className="voice-participant-dot" />
-      <span className="voice-participant-name">
-        {name}
-        {isLocal ? " (you)" : ""}
-      </span>
-      {isSpeaking && <span className="voice-speaking-pill">Speaking</span>}
+    <div className={`voice-tile ${isSpeaking ? "speaking" : ""}`}>
+      {isCameraOn && cameraPub?.videoTrack ? (
+        <VideoTrack
+          trackRef={{
+            participant,
+            publication: cameraPub,
+            source: Track.Source.Camera,
+          }}
+          className="voice-tile-video"
+        />
+      ) : (
+        <div className="voice-tile-avatar">
+          <span className="voice-tile-initial">
+            {name.charAt(0).toUpperCase()}
+          </span>
+        </div>
+      )}
+      <div className="voice-tile-name">{name}</div>
+      {isSpeaking && <div className="voice-tile-speaking-ring" />}
     </div>
   );
 }
 
-export default function VoiceChannel({ room, onParticipantsChange }: VoiceChannelProps) {
+export default function VoiceChannel({ room, onParticipantsChange, onVoiceControlsChange }: VoiceChannelProps) {
   const { user, profile } = useAuth();
   const [token, setToken] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
@@ -275,8 +362,9 @@ export default function VoiceChannel({ room, onParticipantsChange }: VoiceChanne
   useEffect(() => {
     return () => {
       onParticipantsChange?.(room.id, []);
+      onVoiceControlsChange?.(null);
     };
-  }, [onParticipantsChange, room.id]);
+  }, [onParticipantsChange, onVoiceControlsChange, room.id]);
 
   async function handleJoin() {
     if (!user) return;
@@ -304,6 +392,7 @@ export default function VoiceChannel({ room, onParticipantsChange }: VoiceChanne
   function handleLeave() {
     setToken(null);
     onParticipantsChange?.(room.id, []);
+    onVoiceControlsChange?.(null);
   }
 
   return (
@@ -320,7 +409,7 @@ export default function VoiceChannel({ room, onParticipantsChange }: VoiceChanne
             <div className="voice-join-card">
               <div className="voice-join-title">Join channel</div>
               <p className="voice-join-subtitle">
-                Connect with voice and video using LiveKit.
+                Connect to voice chat.
               </p>
               {error && <div className="voice-error">{error}</div>}
               <button
@@ -340,17 +429,15 @@ export default function VoiceChannel({ room, onParticipantsChange }: VoiceChanne
             onDisconnected={handleLeave}
             data-lk-theme="default"
             audio
-            video
+            video={false}
           >
             <VoiceRoomContent
               onLeave={handleLeave}
               pushToTalkEnabled={profile.pushToTalkEnabled}
               pushToTalkKey={profile.pushToTalkKey}
-              audioInputId={profile.audioInputId}
-              audioOutputId={profile.audioOutputId}
-              videoInputId={profile.videoInputId}
               roomId={room.id}
               onParticipantsChange={onParticipantsChange}
+              onVoiceControlsChange={onVoiceControlsChange}
             />
           </LiveKitRoom>
         )}
