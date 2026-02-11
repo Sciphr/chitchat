@@ -1,9 +1,10 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { ArrowDownCircle, AtSign, MessageSquare } from "lucide-react";
-import type { Message, Room } from "../../types";
+import { ArrowDownCircle, AtSign, Download, ImageIcon, MessageSquare } from "lucide-react";
+import type { Message, MessageAttachment, Room } from "../../types";
 import MessageInput from "./MessageInput";
 import type { Socket } from "socket.io-client";
+import { getServerUrl, getToken } from "../../lib/api";
 
 interface ChatRoomProps {
   room: Room;
@@ -16,6 +17,106 @@ interface ChatRoomProps {
   unreadCount?: number;
   firstUnreadAt?: string;
   onMarkRead?: (roomId: string) => void;
+}
+
+function formatBytes(size: number) {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+async function fetchAttachmentBlob(url: string): Promise<Blob> {
+  const token = getToken();
+  if (!token) throw new Error("Missing auth token");
+  const res = await fetch(`${getServerUrl()}${url}`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || "Failed to fetch attachment");
+  }
+  return res.blob();
+}
+
+function AttachmentCard({ attachment }: { attachment: MessageAttachment }) {
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const isImage = attachment.mime_type.startsWith("image/");
+
+  useEffect(() => {
+    let active = true;
+    let objectUrl: string | null = null;
+
+    async function loadPreview() {
+      if (!isImage) return;
+      try {
+        const blob = await fetchAttachmentBlob(attachment.url);
+        if (!active) return;
+        objectUrl = URL.createObjectURL(blob);
+        setPreviewUrl(objectUrl);
+      } catch (err) {
+        if (!active) return;
+        setPreviewError(err instanceof Error ? err.message : "Preview unavailable");
+      }
+    }
+
+    void loadPreview();
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [attachment.id, attachment.url, isImage]);
+
+  async function handleDownload() {
+    try {
+      const blob = await fetchAttachmentBlob(attachment.url);
+      const objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = objectUrl;
+      a.download = attachment.original_name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(objectUrl);
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
+  return (
+    <div className="chat-attachment-card">
+      {isImage ? (
+        previewUrl ? (
+          <img
+            src={previewUrl}
+            alt={attachment.original_name}
+            className="chat-attachment-image"
+          />
+        ) : (
+          <div className="chat-attachment-placeholder">
+            <ImageIcon size={14} />
+            <span>{previewError ? "Preview unavailable" : "Loading image..."}</span>
+          </div>
+        )
+      ) : (
+        <div className="chat-attachment-placeholder">
+          <MessageSquare size={14} />
+          <span>File</span>
+        </div>
+      )}
+      <div className="chat-attachment-meta">
+        <div className="chat-attachment-name" title={attachment.original_name}>
+          {attachment.original_name}
+        </div>
+        <div className="chat-attachment-size">{formatBytes(attachment.size_bytes)}</div>
+      </div>
+      <button className="chat-attachment-download" onClick={handleDownload}>
+        <Download size={12} />
+      </button>
+    </div>
+  );
 }
 
 export default function ChatRoom({
@@ -192,7 +293,11 @@ export default function ChatRoom({
     );
   }
 
-  function handleSend(content: string, retryMessageId?: string) {
+  function handleSend(
+    content: string,
+    attachments: MessageAttachment[] = [],
+    retryMessageId?: string
+  ) {
     if (!isConnected || !currentUserId) {
       setSendError("Not connected. Try again.");
       return;
@@ -214,6 +319,7 @@ export default function ChatRoom({
                 pending: true,
                 failed: false,
                 error: undefined,
+                attachments,
               }
             : msg
         )
@@ -226,6 +332,7 @@ export default function ChatRoom({
         username: currentUsername,
         avatar_url: currentAvatarUrl || undefined,
         content,
+        attachments,
         created_at: new Date().toISOString(),
         client_nonce: nonce,
         pending: true,
@@ -236,7 +343,12 @@ export default function ChatRoom({
 
     socket.emit(
       "message:send",
-      { room_id: room.id, content, client_nonce: nonce },
+      {
+        room_id: room.id,
+        content,
+        client_nonce: nonce,
+        attachment_ids: attachments.map((attachment) => attachment.id),
+      },
       (ack?: { ok: boolean; error?: string; message?: Message }) => {
         if (!ack || !ack.ok || !ack.message) {
           setMessages((prev) =>
@@ -298,8 +410,8 @@ export default function ChatRoom({
   }
 
   function handleRetry(msg: Message) {
-    if (!msg.content.trim()) return;
-    handleSend(msg.content, msg.id);
+    if (!msg.content.trim() && (!msg.attachments || msg.attachments.length === 0)) return;
+    handleSend(msg.content, msg.attachments || [], msg.id);
   }
 
   function isAtBottom(el: HTMLDivElement) {
@@ -474,6 +586,13 @@ export default function ChatRoom({
                   <p className="text-sm text-[var(--text-secondary)] break-words leading-relaxed">
                     {msg.content}
                   </p>
+                  {msg.attachments && msg.attachments.length > 0 && (
+                    <div className="chat-attachments-list">
+                      {msg.attachments.map((attachment) => (
+                        <AttachmentCard key={attachment.id} attachment={attachment} />
+                      ))}
+                    </div>
+                  )}
                 </div>
                 {canDelete && (
                   <button
@@ -511,7 +630,7 @@ export default function ChatRoom({
         </div>
       )}
       <MessageInput
-        onSend={handleSend}
+        onSend={(content, attachments) => handleSend(content, attachments || [])}
         onTypingChange={handleTypingChange}
         disabled={!isConnected}
         placeholder={room.type === "dm" ? `Message @${room.other_username || "user"}` : `Message #${room.name}`}

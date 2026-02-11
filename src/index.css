@@ -575,7 +575,7 @@ body {
 
 .sidebar-voice-controls-buttons {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 6px;
 }
 
@@ -1430,6 +1430,155 @@ body {
   padding: 12px 18px;
   border-radius: 14px;
   box-shadow: 0 12px 26px -18px rgba(124, 106, 255, 0.6);
+}
+
+.chat-attach-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.chat-attach-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--border-light);
+}
+
+.chat-attachments-staging {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 10px 0;
+}
+
+.chat-attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 320px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+  padding: 5px 8px 5px 10px;
+}
+
+.chat-attachment-chip-name {
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-attachment-chip-size {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.chat-attachment-chip-remove {
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.chat-attachment-chip-remove:hover {
+  color: var(--text-primary);
+  border-color: var(--border-light);
+}
+
+.chat-upload-error {
+  padding: 0 10px 10px;
+  font-size: 12px;
+  color: var(--danger);
+}
+
+.chat-attachments-list {
+  margin-top: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.chat-attachment-card {
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  padding: 8px;
+}
+
+.chat-attachment-image,
+.chat-attachment-placeholder {
+  width: 54px;
+  height: 54px;
+  border-radius: 8px;
+}
+
+.chat-attachment-image {
+  object-fit: cover;
+  border: 1px solid var(--border);
+}
+
+.chat-attachment-placeholder {
+  border: 1px solid var(--border);
+  background: rgba(15, 15, 23, 0.55);
+  color: var(--text-muted);
+  display: grid;
+  place-items: center;
+  text-align: center;
+  font-size: 10px;
+  padding: 4px;
+  gap: 4px;
+}
+
+.chat-attachment-meta {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.chat-attachment-name {
+  font-size: 12px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-attachment-size {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.chat-attachment-download {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.chat-attachment-download:hover {
+  color: var(--text-primary);
+  border-color: var(--border-light);
 }
 
 /* Profile settings */
@@ -2386,6 +2535,55 @@ body {
   text-transform: uppercase;
   color: var(--text-muted);
   font-weight: 600;
+}
+
+.voice-mix-card {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: rgba(15, 15, 23, 0.58);
+  padding: 10px 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.voice-mix-title {
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.voice-mix-list {
+  display: grid;
+  gap: 8px;
+}
+
+.voice-mix-row {
+  display: grid;
+  grid-template-columns: minmax(90px, 1fr) 1.6fr auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.voice-mix-name {
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.voice-mix-slider {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.voice-mix-value {
+  width: 40px;
+  text-align: right;
+  font-size: 11px;
+  color: var(--text-muted);
 }
 
 .voice-participants {

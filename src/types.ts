@@ -31,10 +31,12 @@ export interface VoiceControls {
   isDeafened: boolean;
   isCameraOn: boolean;
   isScreenSharing: boolean;
+  isNoiseSuppressionEnabled: boolean;
   toggleMute: () => void;
   toggleDeafen: () => void;
   toggleVideo: () => void;
   toggleScreenShare: () => void;
+  toggleNoiseSuppression: () => void;
   /** Start screen share with specific quality options */
   startScreenShare: (resolution: string, fps: number) => void;
   /** Stop screen share */
@@ -66,5 +68,15 @@ export interface Message {
   failed?: boolean;
   error?: string;
   content: string;
+  attachments?: MessageAttachment[];
   created_at: string;
+}
+
+export interface MessageAttachment {
+  id: string;
+  original_name: string;
+  mime_type: string;
+  size_bytes: number;
+  created_at: string;
+  url: string;
 }

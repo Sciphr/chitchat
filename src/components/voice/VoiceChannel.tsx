@@ -71,8 +71,18 @@ function VoiceRoomContent({
   const [manualMute, setManualMute] = useState(false);
   const [deafened, setDeafened] = useState(false);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
+  const [noiseSuppressionEnabled, setNoiseSuppressionEnabled] = useState(true);
   const [audioInputDeviceId, setAudioInputDeviceId] = useState("");
   const [audioOutputDeviceId, setAudioOutputDeviceId] = useState("");
+  const [participantVolumes, setParticipantVolumes] = useState<
+    Record<string, number>
+  >({});
+
+  const localIdentity = room.localParticipant.identity;
+  const remoteParticipants = useMemo(
+    () => participants.filter((participant) => participant.identity !== localIdentity),
+    [participants, localIdentity]
+  );
 
   const formattedKey = useMemo(() => {
     if (!pushToTalkKey) return "Space";
@@ -82,41 +92,64 @@ function VoiceRoomContent({
     return pushToTalkKey;
   }, [pushToTalkKey]);
 
-  // Mic enable/disable based on mute/deafen/PTT
+  const micCaptureOptions = useMemo(
+    () => ({
+      noiseSuppression: noiseSuppressionEnabled,
+      echoCancellation: true,
+      autoGainControl: true,
+    }),
+    [noiseSuppressionEnabled]
+  );
+
+  // Mic enable/disable based on mute/deafen/PTT/noise suppression
   useEffect(() => {
     if (!room) return;
 
-    if (pushToTalkEnabled) {
-      room.localParticipant.setMicrophoneEnabled(false);
-      if (manualMute || deafened) {
-        room.localParticipant.setMicrophoneEnabled(false);
+    async function applyMicState() {
+      if (pushToTalkEnabled || manualMute || deafened) {
+        await room.localParticipant.setMicrophoneEnabled(false);
+        return;
       }
-      return;
+      await room.localParticipant.setMicrophoneEnabled(true, micCaptureOptions);
     }
 
-    room.localParticipant.setMicrophoneEnabled(!manualMute && !deafened);
-  }, [room, pushToTalkEnabled, manualMute, deafened]);
+    void applyMicState();
+  }, [room, pushToTalkEnabled, manualMute, deafened, micCaptureOptions]);
 
-  // Deafen volume control
+  // Apply per-user volume (and deafen override) to all remote audio tracks.
   useEffect(() => {
     if (!room) return;
 
-    function applyVolume(volume: number) {
+    function getEffectiveVolume(participantId: string) {
+      if (deafened) return 0;
+      return participantVolumes[participantId] ?? 1;
+    }
+
+    function applyVolumes() {
       room.remoteParticipants.forEach((participant) => {
+        const effectiveVolume = getEffectiveVolume(participant.identity);
         participant.getTrackPublications().forEach((pub) => {
           if (pub.track instanceof RemoteAudioTrack) {
-            pub.track.setVolume(volume);
+            pub.track.setVolume(effectiveVolume);
           }
         });
       });
     }
 
-    const volume = deafened ? 0 : 1;
-    applyVolume(volume);
+    applyVolumes();
 
-    function onTrackSubscribed(track: Track) {
+    function onTrackSubscribed(
+      track: Track,
+      _publication: unknown,
+      participant?: { identity: string }
+    ) {
       if (track instanceof RemoteAudioTrack) {
-        track.setVolume(volume);
+        const effectiveVolume = participant
+          ? getEffectiveVolume(participant.identity)
+          : deafened
+            ? 0
+            : 1;
+        track.setVolume(effectiveVolume);
       }
     }
 
@@ -124,7 +157,24 @@ function VoiceRoomContent({
     return () => {
       room.off(RoomEvent.TrackSubscribed, onTrackSubscribed);
     };
-  }, [room, deafened]);
+  }, [room, deafened, participantVolumes]);
+
+  // Remove stale per-user volume entries when participants leave.
+  useEffect(() => {
+    const activeIds = new Set(remoteParticipants.map((p) => p.identity));
+    setParticipantVolumes((prev) => {
+      const next: Record<string, number> = {};
+      let changed = false;
+      for (const [participantId, volume] of Object.entries(prev)) {
+        if (activeIds.has(participantId)) {
+          next[participantId] = volume;
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [remoteParticipants]);
 
   // Apply preferred audio devices when joining room
   useEffect(() => {
@@ -167,7 +217,7 @@ function VoiceRoomContent({
       if (deafened || manualMute) return;
       if (isTypingTarget(e.target)) return;
       if (e.code === pushToTalkKey || e.key === pushToTalkKey) {
-        room.localParticipant.setMicrophoneEnabled(true);
+        room.localParticipant.setMicrophoneEnabled(true, micCaptureOptions);
       }
     }
 
@@ -183,7 +233,14 @@ function VoiceRoomContent({
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [room, pushToTalkEnabled, pushToTalkKey, manualMute, deafened]);
+  }, [
+    room,
+    pushToTalkEnabled,
+    pushToTalkKey,
+    manualMute,
+    deafened,
+    micCaptureOptions,
+  ]);
 
   // Report participants upward + play join/leave sounds for remote participants
   const prevCountRef = useRef(0);
@@ -262,6 +319,10 @@ function VoiceRoomContent({
       else playDeafen();
       return !prev;
     });
+  }, []);
+
+  const toggleNoiseSuppression = useCallback(() => {
+    setNoiseSuppressionEnabled((prev) => !prev);
   }, []);
 
   const startScreenShare = useCallback(async (resolution: string, fps: number) => {
@@ -364,10 +425,12 @@ function VoiceRoomContent({
       isDeafened: deafened,
       isCameraOn: isCameraEnabled ?? false,
       isScreenSharing,
+      isNoiseSuppressionEnabled: noiseSuppressionEnabled,
       toggleMute,
       toggleDeafen,
       toggleVideo,
       toggleScreenShare,
+      toggleNoiseSuppression,
       startScreenShare,
       stopScreenShare,
       setAudioInputDevice,
@@ -385,10 +448,12 @@ function VoiceRoomContent({
     deafened,
     isCameraEnabled,
     isScreenSharing,
+    noiseSuppressionEnabled,
     toggleMute,
     toggleDeafen,
     toggleVideo,
     toggleScreenShare,
+    toggleNoiseSuppression,
     startScreenShare,
     stopScreenShare,
     setAudioInputDevice,
@@ -478,6 +543,41 @@ function VoiceRoomContent({
               <TileContent tile={tile} />
             </div>
           ))}
+        </div>
+      )}
+
+      {remoteParticipants.length > 0 && (
+        <div className="voice-mix-card">
+          <div className="voice-mix-title">Participant Volume</div>
+          <div className="voice-mix-list">
+            {remoteParticipants.map((participant) => {
+              const name = participant.name || participant.identity;
+              const volume = participantVolumes[participant.identity] ?? 1;
+              return (
+                <div key={participant.identity} className="voice-mix-row">
+                  <span className="voice-mix-name" title={name}>
+                    {name}
+                  </span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    step={1}
+                    className="voice-mix-slider"
+                    value={Math.round(volume * 100)}
+                    onChange={(event) => {
+                      const nextVolume = Number(event.target.value) / 100;
+                      setParticipantVolumes((prev) => ({
+                        ...prev,
+                        [participant.identity]: nextVolume,
+                      }));
+                    }}
+                  />
+                  <span className="voice-mix-value">{Math.round(volume * 100)}%</span>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 

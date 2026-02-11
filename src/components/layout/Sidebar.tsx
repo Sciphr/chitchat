@@ -10,6 +10,7 @@ import {
   VideoOff,
   MonitorUp,
   PhoneOff,
+  Wind,
   MessageSquare,
   Volume2,
   ChevronDown,
@@ -572,6 +573,17 @@ export default function Sidebar({
               title={voiceControls.isCameraOn ? "Turn off camera" : "Turn on camera"}
             >
               {voiceControls.isCameraOn ? <Video size={18} /> : <VideoOff size={18} />}
+            </button>
+            <button
+              onClick={voiceControls.toggleNoiseSuppression}
+              className={`sidebar-vc-btn ${voiceControls.isNoiseSuppressionEnabled ? "active" : ""}`}
+              title={
+                voiceControls.isNoiseSuppressionEnabled
+                  ? "Disable noise suppression"
+                  : "Enable noise suppression"
+              }
+            >
+              <Wind size={18} />
             </button>
             <div className="share-picker-anchor" ref={sharePickerRef}>
               <button
