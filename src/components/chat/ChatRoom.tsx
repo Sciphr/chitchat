@@ -72,15 +72,30 @@ export default function ChatRoom({
       setMessages((prev) => prev.filter((msg) => msg.id !== messageId));
     }
 
+    function onSystemMessage({ content }: { content: string }) {
+      shouldScrollRef.current = true;
+      const systemMsg: Message = {
+        id: `system-${Date.now()}`,
+        room_id: room.id,
+        user_id: "__system__",
+        username: "System",
+        content,
+        created_at: new Date().toISOString(),
+      };
+      setMessages((prev) => [...prev, systemMsg]);
+    }
+
     socket.on("message:new", onMessage);
     socket.on("message:history", onHistory);
     socket.on("message:deleted", onDeleted);
+    socket.on("message:system", onSystemMessage);
 
     return () => {
       socket.emit("room:leave", room.id);
       socket.off("message:new", onMessage);
       socket.off("message:history", onHistory);
       socket.off("message:deleted", onDeleted);
+      socket.off("message:system", onSystemMessage);
       setMessages([]);
       setHasMore(false);
     };

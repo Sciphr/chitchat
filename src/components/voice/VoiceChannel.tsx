@@ -11,9 +11,10 @@ import {
   useIsSpeaking,
   isTrackReference,
 } from "@livekit/components-react";
-import { Track, RoomEvent, RemoteAudioTrack } from "livekit-client";
+import { Track, RoomEvent, RemoteAudioTrack, VideoPresets } from "livekit-client";
 import { useAuth } from "../../hooks/useAuth";
-import { fetchLiveKitToken, getLiveKitUrl } from "../../lib/livekit";
+import { fetchLiveKitToken, getLiveKitUrl, resolveResolution, clampResolution, clampFps } from "../../lib/livekit";
+import type { MediaLimits } from "../../lib/livekit";
 import { playJoin, playLeave, playMute, playUnmute, playDeafen, playUndeafen } from "../../lib/sounds";
 
 interface VoiceChannelProps {
@@ -33,6 +34,7 @@ function VoiceRoomContent({
   pushToTalkEnabled,
   pushToTalkKey,
   roomId,
+  mediaLimits,
   onParticipantsChange,
   onVoiceControlsChange,
 }: {
@@ -40,6 +42,7 @@ function VoiceRoomContent({
   pushToTalkEnabled: boolean;
   pushToTalkKey: string;
   roomId: string;
+  mediaLimits: MediaLimits;
   onParticipantsChange?: (roomId: string, participants: VoiceParticipant[]) => void;
   onVoiceControlsChange?: (controls: VoiceControls | null) => void;
 }) {
@@ -183,8 +186,36 @@ function VoiceRoomContent({
   }, []);
 
   const toggleVideo = useCallback(() => {
-    room.localParticipant.setCameraEnabled(!isCameraEnabled);
-  }, [room, isCameraEnabled]);
+    if (!isCameraEnabled) {
+      // Read user preference from localStorage, clamp to server limits
+      const userRes = localStorage.getItem("chitchat-camera-resolution") || "720p";
+      const userFps = parseInt(localStorage.getItem("chitchat-camera-fps") || "30", 10);
+      const clampedRes = clampResolution(userRes, mediaLimits.maxVideoResolution);
+      const clampedFps = clampFps(userFps, mediaLimits.maxVideoFps);
+      const dims = resolveResolution(clampedRes);
+      // Map to a VideoPreset for appropriate encoding bitrate
+      const presetMap: Record<string, typeof VideoPresets.h720> = {
+        "360p": VideoPresets.h360,
+        "480p": VideoPresets.h540,
+        "720p": VideoPresets.h720,
+        "1080p": VideoPresets.h1080,
+        "1440p": VideoPresets.h1440,
+      };
+      const preset = presetMap[clampedRes] || VideoPresets.h720;
+      room.localParticipant.setCameraEnabled(
+        true,
+        {
+          resolution: { width: dims.width, height: dims.height, frameRate: clampedFps },
+        },
+        {
+          videoEncoding: { maxBitrate: preset.encoding.maxBitrate, maxFramerate: clampedFps },
+          simulcast: false,
+        },
+      );
+    } else {
+      room.localParticipant.setCameraEnabled(false);
+    }
+  }, [room, isCameraEnabled, mediaLimits]);
 
   const toggleDeafen = useCallback(() => {
     setDeafened((prev) => {
@@ -194,16 +225,43 @@ function VoiceRoomContent({
     });
   }, []);
 
-  const toggleScreenShare = useCallback(async () => {
+  const startScreenShare = useCallback(async (resolution: string, fps: number) => {
     try {
-      const newValue = !isScreenSharing;
-      await room.localParticipant.setScreenShareEnabled(newValue);
-      setIsScreenSharing(newValue);
+      // Clamp to server limits
+      const clampedRes = clampResolution(resolution, mediaLimits.maxScreenShareResolution);
+      const clampedFps = clampFps(fps, mediaLimits.maxScreenShareFps);
+      const dims = resolveResolution(clampedRes);
+      await room.localParticipant.setScreenShareEnabled(true, {
+        resolution: {
+          width: dims.width,
+          height: dims.height,
+          frameRate: clampedFps,
+        },
+      });
+      setIsScreenSharing(true);
     } catch {
       // User cancelled the screen picker dialog
       setIsScreenSharing(false);
     }
-  }, [room, isScreenSharing]);
+  }, [room, mediaLimits]);
+
+  const stopScreenShare = useCallback(async () => {
+    try {
+      await room.localParticipant.setScreenShareEnabled(false);
+      setIsScreenSharing(false);
+    } catch {
+      setIsScreenSharing(false);
+    }
+  }, [room]);
+
+  const toggleScreenShare = useCallback(async () => {
+    if (isScreenSharing) {
+      await stopScreenShare();
+    } else {
+      // Default: use server max limits (backward compat for sidebar button)
+      await startScreenShare(mediaLimits.maxScreenShareResolution, mediaLimits.maxScreenShareFps);
+    }
+  }, [isScreenSharing, stopScreenShare, startScreenShare, mediaLimits]);
 
   const handleLeave = useCallback(() => {
     playLeave();
@@ -223,7 +281,13 @@ function VoiceRoomContent({
       toggleDeafen,
       toggleVideo,
       toggleScreenShare,
+      startScreenShare,
+      stopScreenShare,
       disconnect: handleLeave,
+      mediaLimits: {
+        maxScreenShareResolution: mediaLimits.maxScreenShareResolution,
+        maxScreenShareFps: mediaLimits.maxScreenShareFps,
+      },
     });
   }, [
     manualMute,
@@ -234,8 +298,11 @@ function VoiceRoomContent({
     toggleDeafen,
     toggleVideo,
     toggleScreenShare,
+    startScreenShare,
+    stopScreenShare,
     handleLeave,
     onVoiceControlsChange,
+    mediaLimits,
   ]);
 
   // Filter screen share tracks (only actual track references, not placeholders)
@@ -380,9 +447,17 @@ function ParticipantTileCard({
   );
 }
 
+const DEFAULT_MEDIA_LIMITS: MediaLimits = {
+  maxVideoResolution: "720p",
+  maxVideoFps: 30,
+  maxScreenShareResolution: "1080p",
+  maxScreenShareFps: 30,
+};
+
 export default function VoiceChannel({ room, onParticipantsChange, onVoiceControlsChange }: VoiceChannelProps) {
   const { user, profile } = useAuth();
   const [token, setToken] = useState<string | null>(null);
+  const [mediaLimits, setMediaLimits] = useState<MediaLimits>(DEFAULT_MEDIA_LIMITS);
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -405,12 +480,13 @@ export default function VoiceChannel({ room, onParticipantsChange, onVoiceContro
     try {
       setError(null);
       setConnecting(true);
-      const nextToken = await fetchLiveKitToken({
+      const result = await fetchLiveKitToken({
         room: room.id,
         userId: user.id,
         username: profile.username,
       });
-      setToken(nextToken);
+      setToken(result.token);
+      setMediaLimits(result.mediaLimits);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to join channel");
     } finally {
@@ -465,6 +541,7 @@ export default function VoiceChannel({ room, onParticipantsChange, onVoiceContro
               pushToTalkEnabled={profile.pushToTalkEnabled}
               pushToTalkKey={profile.pushToTalkKey}
               roomId={room.id}
+              mediaLimits={mediaLimits}
               onParticipantsChange={onParticipantsChange}
               onVoiceControlsChange={onVoiceControlsChange}
             />

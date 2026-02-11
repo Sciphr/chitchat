@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import type { Room, VoiceControls } from "../../types";
 import {
@@ -11,6 +11,8 @@ import {
   MonitorUp,
   PhoneOff,
 } from "lucide-react";
+import { getResolutionsUpTo, getFpsUpTo } from "../../lib/livekit";
+import { getServerUrl } from "../../lib/api";
 
 interface SidebarProps {
   rooms: Room[];
@@ -45,6 +47,18 @@ export default function Sidebar({
   const [newRoomName, setNewRoomName] = useState("");
   const [showCreate, setShowCreate] = useState(false);
   const [createType, setCreateType] = useState<"text" | "voice">("text");
+  const [showSharePicker, setShowSharePicker] = useState(false);
+  const [shareRes, setShareRes] = useState("1080p");
+  const [shareFps, setShareFps] = useState(30);
+  const sharePickerRef = useRef<HTMLDivElement>(null);
+  const [pickerLimits, setPickerLimits] = useState<{
+    maxScreenShareResolution: string;
+    maxScreenShareFps: number;
+  } | null>(null);
+  const [pickerPos, setPickerPos] = useState<{ bottom: number; left: number }>({
+    bottom: 0,
+    left: 0,
+  });
 
   const textRooms = rooms.filter((r) => r.type === "text");
   const voiceRooms = rooms.filter((r) => r.type === "voice");
@@ -96,6 +110,25 @@ export default function Sidebar({
     prevParticipantsRef.current = { ...voiceParticipants };
   }, [voiceParticipants]);
 
+  // Close picker when clicking outside
+  useEffect(() => {
+    if (!showSharePicker) return;
+    function handleClick(e: MouseEvent) {
+      if (sharePickerRef.current && !sharePickerRef.current.contains(e.target as Node)) {
+        setShowSharePicker(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [showSharePicker]);
+
+  // Close picker if sharing starts or voice disconnects
+  useEffect(() => {
+    if (!voiceControls || voiceControls.isScreenSharing) {
+      setShowSharePicker(false);
+    }
+  }, [voiceControls?.isScreenSharing, voiceControls]);
+
   const statusMap: Record<string, { label: string; color: string }> = {
     online: { label: "Online", color: "var(--success)" },
     away: { label: "Away", color: "#f59e0b" },
@@ -104,6 +137,39 @@ export default function Sidebar({
   };
 
   const currentStatus = statusMap[status] || statusMap.online;
+
+  // Fetch fresh media limits from server and position the popover
+  const openSharePicker = useCallback(async () => {
+    // Calculate fixed position from the anchor ref
+    if (sharePickerRef.current) {
+      const rect = sharePickerRef.current.getBoundingClientRect();
+      setPickerPos({
+        bottom: window.innerHeight - rect.top + 8,
+        left: rect.left,
+      });
+    }
+
+    // Fetch fresh limits from public server info
+    try {
+      const res = await fetch(`${getServerUrl()}/api/server/info`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.mediaLimits) {
+          setPickerLimits({
+            maxScreenShareResolution: data.mediaLimits.maxScreenShareResolution,
+            maxScreenShareFps: data.mediaLimits.maxScreenShareFps,
+          });
+        }
+      }
+    } catch {
+      // Fall back to voice controls limits
+    }
+
+    setShowSharePicker(true);
+  }, []);
+
+  // Use freshly-fetched limits when available, otherwise fall back to token-time limits
+  const activeLimits = pickerLimits || voiceControls?.mediaLimits;
 
   function openCreateModal() {
     setCreateType("text");
@@ -313,13 +379,64 @@ export default function Sidebar({
             >
               {voiceControls.isCameraOn ? <Video size={18} /> : <VideoOff size={18} />}
             </button>
-            <button
-              onClick={voiceControls.toggleScreenShare}
-              className={`sidebar-vc-btn ${voiceControls.isScreenSharing ? "active" : ""}`}
-              title={voiceControls.isScreenSharing ? "Stop sharing" : "Share screen"}
-            >
-              <MonitorUp size={18} />
-            </button>
+            <div className="share-picker-anchor" ref={sharePickerRef}>
+              <button
+                onClick={() => {
+                  if (voiceControls.isScreenSharing) {
+                    voiceControls.stopScreenShare();
+                  } else if (showSharePicker) {
+                    setShowSharePicker(false);
+                  } else {
+                    openSharePicker();
+                  }
+                }}
+                className={`sidebar-vc-btn ${voiceControls.isScreenSharing ? "active" : ""}`}
+                title={voiceControls.isScreenSharing ? "Stop sharing" : "Share screen"}
+              >
+                <MonitorUp size={18} />
+              </button>
+              {showSharePicker && !voiceControls.isScreenSharing && (
+                <div
+                  className="share-picker-popover"
+                  style={{ bottom: pickerPos.bottom, left: pickerPos.left }}
+                >
+                  <div className="share-picker-title">Screen Share Quality</div>
+                  <label className="share-picker-label">Resolution</label>
+                  <select
+                    className="share-picker-select"
+                    value={shareRes}
+                    onChange={(e) => setShareRes(e.target.value)}
+                  >
+                    {getResolutionsUpTo(activeLimits?.maxScreenShareResolution || "1080p").map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.label} ({r.width}x{r.height})
+                      </option>
+                    ))}
+                  </select>
+                  <label className="share-picker-label">Frame Rate</label>
+                  <select
+                    className="share-picker-select"
+                    value={shareFps}
+                    onChange={(e) => setShareFps(parseInt(e.target.value, 10))}
+                  >
+                    {getFpsUpTo(activeLimits?.maxScreenShareFps || 30).map((fps) => (
+                      <option key={fps} value={fps}>
+                        {fps} fps
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    className="share-picker-start"
+                    onClick={() => {
+                      setShowSharePicker(false);
+                      voiceControls.startScreenShare(shareRes, shareFps);
+                    }}
+                  >
+                    Start Sharing
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
           <button
             onClick={voiceControls.disconnect}
