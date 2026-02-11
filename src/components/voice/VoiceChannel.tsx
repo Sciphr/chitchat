@@ -11,7 +11,13 @@ import {
   useIsSpeaking,
   isTrackReference,
 } from "@livekit/components-react";
-import { Track, RoomEvent, RemoteAudioTrack, VideoPresets } from "livekit-client";
+import {
+  Track,
+  RoomEvent,
+  RemoteAudioTrack,
+  VideoPresets,
+  DefaultReconnectPolicy,
+} from "livekit-client";
 import { Volume2 } from "lucide-react";
 import { useAuth } from "../../hooks/useAuth";
 import { fetchLiveKitToken, getLiveKitUrl, resolveResolution, clampResolution, clampFps } from "../../lib/livekit";
@@ -224,7 +230,7 @@ function VoiceRoomContent({
     if (!isCameraEnabled) {
       // Fixed camera quality profile for predictable behavior.
       const defaultRes = "720p";
-      const defaultFps = 30;
+      const defaultFps = 60;
       const dims = resolveResolution(defaultRes);
       // Map to a VideoPreset for appropriate encoding bitrate
       const presetMap: Record<string, typeof VideoPresets.h720> = {
@@ -542,6 +548,21 @@ const DEFAULT_MEDIA_LIMITS: MediaLimits = {
   maxScreenShareFps: 30,
 };
 
+const LIVEKIT_RECONNECT_POLICY = new DefaultReconnectPolicy([
+  0,
+  300,
+  1200,
+  2700,
+  4800,
+  7000,
+  7000,
+  7000,
+  7000,
+  7000,
+  7000,
+  7000,
+]);
+
 export default function VoiceChannel({ room, onParticipantsChange, onVoiceControlsChange }: VoiceChannelProps) {
   const { user, profile } = useAuth();
   const [token, setToken] = useState<string | null>(null);
@@ -624,6 +645,16 @@ export default function VoiceChannel({ room, onParticipantsChange, onVoiceContro
             data-lk-theme="default"
             audio
             video={false}
+            options={{
+              adaptiveStream: true,
+              dynacast: true,
+              reconnectPolicy: LIVEKIT_RECONNECT_POLICY,
+            }}
+            connectOptions={{
+              maxRetries: 3,
+              peerConnectionTimeout: 20_000,
+              websocketTimeout: 20_000,
+            }}
           >
             <VoiceRoomContent
               onLeave={handleLeave}
