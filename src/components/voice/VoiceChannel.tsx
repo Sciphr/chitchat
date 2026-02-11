@@ -243,78 +243,107 @@ function VoiceRoomContent({
     .filter((t) => t.source === Track.Source.ScreenShare)
     .filter(isTrackReference);
 
-  const [expandedScreen, setExpandedScreen] = useState<string | null>(null);
+  const [focusedKey, setFocusedKey] = useState<string | null>(null);
 
-  // Calculate grid columns based on participant count
-  const count = participants.length;
-  const columns = count <= 1 ? 1 : count <= 4 ? 2 : count <= 9 ? 3 : 4;
+  // Build unified tile list: participant cameras + screen shares
+  type TileItem =
+    | { kind: "participant"; participant: (typeof participants)[number]; key: string }
+    | { kind: "screen"; trackRef: (typeof screenShareTracks)[number]; participant: (typeof participants)[number]; key: string };
+
+  const tiles: TileItem[] = [];
+  participants.forEach((p) => {
+    tiles.push({ kind: "participant", participant: p, key: `cam-${p.identity}` });
+  });
+  screenShareTracks.forEach((t) => {
+    const p = participants.find((pp) => pp.identity === t.participant.identity);
+    if (p) tiles.push({ kind: "screen", trackRef: t, participant: p, key: `screen-${t.participant.identity}` });
+  });
+
+  // Clear focus if the focused tile no longer exists
+  useEffect(() => {
+    if (focusedKey && !tiles.some((t) => t.key === focusedKey)) {
+      setFocusedKey(null);
+    }
+  }, [tiles.length, focusedKey]);
+
+  function handleTileClick(key: string) {
+    setFocusedKey((prev) => (prev === key ? null : key));
+  }
+
+  const focusedTile = focusedKey ? tiles.find((t) => t.key === focusedKey) : null;
+  const otherTiles = focusedKey ? tiles.filter((t) => t.key !== focusedKey) : [];
+
+  // Grid columns for equal-size mode
+  const tileCount = tiles.length;
+  const columns = tileCount <= 1 ? 1 : tileCount <= 4 ? 2 : tileCount <= 9 ? 3 : 4;
 
   return (
     <div className="voice-room">
       <RoomAudioRenderer />
 
-      {/* Screen share thumbnails bar */}
-      {screenShareTracks.length > 0 && (
-        <div className="voice-screen-bar">
-          {screenShareTracks.map((trackRef) => {
-            const id = trackRef.participant.identity;
-            const name = trackRef.participant.name || id;
-            const isExpanded = expandedScreen === id;
-            return (
-              <div key={id + "-screen"} className="voice-screen-item">
-                <button
-                  className="voice-screen-thumb"
-                  onClick={() => setExpandedScreen(isExpanded ? null : id)}
-                  title={isExpanded ? "Close stream" : `Watch ${name}'s stream`}
+      {focusedTile ? (
+        /* Focused layout: one big tile + strip at bottom */
+        <>
+          <div className="voice-focused-main" onClick={() => handleTileClick(focusedTile.key)}>
+            <TileContent tile={focusedTile} />
+          </div>
+          {otherTiles.length > 0 && (
+            <div className="voice-focused-strip">
+              {otherTiles.map((tile) => (
+                <div
+                  key={tile.key}
+                  className="voice-focused-strip-item"
+                  onClick={() => handleTileClick(tile.key)}
                 >
-                  <VideoTrack trackRef={trackRef} />
-                  <span className="voice-screen-label">
-                    {name}{isExpanded ? " — Click to close" : " is sharing"}
-                  </span>
-                </button>
-                {isExpanded && (
-                  <div
-                    className="voice-screen-expanded"
-                    onClick={() => setExpandedScreen(null)}
-                  >
-                    <div
-                      className="voice-screen-expanded-inner"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <VideoTrack trackRef={trackRef} />
-                      <button
-                        className="voice-screen-close"
-                        onClick={() => setExpandedScreen(null)}
-                      >
-                        &times;
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            );
-          })}
+                  <TileContent tile={tile} />
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      ) : (
+        /* Equal grid layout */
+        <div
+          className="voice-tile-grid"
+          style={{ gridTemplateColumns: `repeat(${columns}, 1fr)` }}
+        >
+          {tiles.map((tile) => (
+            <div
+              key={tile.key}
+              className="voice-tile-wrapper"
+              onClick={() => handleTileClick(tile.key)}
+            >
+              <TileContent tile={tile} />
+            </div>
+          ))}
         </div>
       )}
-
-      {/* Participant tile grid — fills available space */}
-      <div
-        className="voice-tile-grid"
-        style={{ gridTemplateColumns: `repeat(${columns}, 1fr)` }}
-      >
-        {participants.map((participant) => (
-          <ParticipantTileCard
-            key={participant.identity}
-            participant={participant}
-          />
-        ))}
-      </div>
 
       {pushToTalkEnabled && (
         <div className="voice-ptt">Hold {formattedKey} to talk</div>
       )}
     </div>
   );
+}
+
+/** Renders the inside of a tile — either a participant camera or a screen share */
+function TileContent({
+  tile,
+}: {
+  tile:
+    | { kind: "participant"; participant: ReturnType<typeof useParticipants>[number]; key: string }
+    | { kind: "screen"; trackRef: any; participant: ReturnType<typeof useParticipants>[number]; key: string };
+}) {
+  if (tile.kind === "screen") {
+    const name = tile.participant.name || tile.participant.identity;
+    return (
+      <div className="voice-tile screen">
+        <VideoTrack trackRef={tile.trackRef} className="voice-tile-video" />
+        <div className="voice-tile-name">{name}'s screen</div>
+      </div>
+    );
+  }
+  return <ParticipantTileCard participant={tile.participant} />;
 }
 
 function ParticipantTileCard({
