@@ -140,12 +140,15 @@ export default function Home() {
     socket.emit("room:create", { name, type });
   }
 
-  function handleParticipantsChange(
-    roomId: string,
-    participants: Array<{ id: string; name: string; isSpeaking: boolean }>
-  ) {
-    setVoiceParticipants((prev) => ({ ...prev, [roomId]: participants }));
-  }
+  const handleParticipantsChange = useCallback(
+    (
+      roomId: string,
+      participants: Array<{ id: string; name: string; isSpeaking: boolean }>
+    ) => {
+      setVoiceParticipants((prev) => ({ ...prev, [roomId]: participants }));
+    },
+    []
+  );
 
   const handleOpenDM = useCallback(
     (targetUser: ServerUser) => {
