@@ -263,6 +263,9 @@ ok "Version: ${VERSION}"
 
 # ─── Download application ────────────────────────────────────────────
 
+# Mark the app directory as safe for git (ownership may differ when running as root)
+git config --global --add safe.directory "$APP_DIR" 2>/dev/null
+
 if [ -d "${APP_DIR}/.git" ]; then
   # Existing installation — pull updates
   info "Updating existing installation..."
