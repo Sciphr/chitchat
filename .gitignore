@@ -18,6 +18,11 @@ src-tauri/target/
 .vscode/
 .idea/
 
+# SQLite temp files
+*.db-shm
+*.db-wal
+*.db-journal
+
 # OS
 .DS_Store
 Thumbs.db
