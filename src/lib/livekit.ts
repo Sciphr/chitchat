@@ -1,9 +1,11 @@
 import { getServerUrl, getToken } from "./api";
 
-const LIVEKIT_URL = import.meta.env.VITE_LIVEKIT_URL || "";
-
 export function getLiveKitUrl(): string {
-  return LIVEKIT_URL;
+  return localStorage.getItem("chitchat_livekit_url") || import.meta.env.VITE_LIVEKIT_URL || "";
+}
+
+export function setLiveKitUrl(url: string) {
+  localStorage.setItem("chitchat_livekit_url", url);
 }
 
 export interface MediaLimits {

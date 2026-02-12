@@ -15,7 +15,14 @@
       "Bash(npx vite build)",
       "Bash(git checkout:*)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(git rm:*)",
+      "Bash(git stash pop:*)",
+      "Bash(git stash:*)",
+      "Bash(sqlite3:*)",
+      "Bash(where:*)",
+      "Bash(del:*)",
+      "Bash(ls -la \"f:\\\\CODING\\\\chitchat\\\\chitchat\\\\server\\\\src\"\" && echo \"---\" && find \"f:CODINGchitchatchitchatserversrc\" -type f -name \"*.ts \")"
     ]
   }
 }

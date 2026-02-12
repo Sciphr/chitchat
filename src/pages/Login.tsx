@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../hooks/useAuth";
+import { setLiveKitUrl } from "../lib/livekit";
 
 interface ServerInfo {
   name: string;
   registrationOpen: boolean;
   inviteOnly: boolean;
+  livekitUrl?: string;
 }
 
 export default function Login() {
@@ -39,6 +41,10 @@ export default function Login() {
       if (res.ok) {
         const data = await res.json();
         setServerInfo(data);
+        // Persist LiveKit URL so voice/video connects to the right server
+        if (data.livekitUrl) {
+          setLiveKitUrl(data.livekitUrl);
+        }
       } else {
         setServerInfo(null);
       }
@@ -200,8 +206,9 @@ export default function Login() {
 
         {/* Card */}
         <div
-          className="rounded-2xl p-7"
+          className="rounded-2xl"
           style={{
+            padding: 28,
             background:
               "linear-gradient(180deg, rgba(22,22,34,0.9) 0%, rgba(15,15,23,0.95) 100%)",
             border: "1px solid var(--border)",
@@ -211,8 +218,14 @@ export default function Login() {
         >
           {error && (
             <div
-              className="mb-5 flex items-start gap-2.5 px-3.5 py-3 text-[13px] rounded-lg"
+              className="rounded-lg"
               style={{
+                marginBottom: 20,
+                display: "flex",
+                alignItems: "flex-start",
+                gap: 10,
+                padding: "12px 14px",
+                fontSize: 13,
                 background: "rgba(248,113,113,0.08)",
                 border: "1px solid rgba(248,113,113,0.15)",
                 color: "var(--danger)",
@@ -236,7 +249,7 @@ export default function Login() {
           )}
 
           <form onSubmit={handleSubmit}>
-            <div className="flex flex-col gap-6">
+            <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
               {/* Server address */}
               <div>
                 <label className="block mb-1.5 text-[12px] font-medium text-[var(--text-secondary)]">
@@ -319,8 +332,9 @@ export default function Login() {
             <button
               type="submit"
               disabled={submitting || !email || !password}
-              className="w-full h-11 mt-6 rounded-lg text-[14px] font-semibold text-white cursor-pointer transition-all duration-200 active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed disabled:active:scale-100"
+              className="w-full h-11 rounded-lg text-[14px] font-semibold text-white cursor-pointer transition-all duration-200 active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed disabled:active:scale-100"
               style={{
+                marginTop: 24,
                 background: submitting
                   ? "var(--accent-hover)"
                   : "linear-gradient(135deg, #7c6aff 0%, #6b5ce7 100%)",
@@ -354,7 +368,7 @@ export default function Login() {
           </form>
 
           {/* Toggle login/register */}
-          <p className="mt-6 text-center text-[13px] text-[var(--text-muted)]">
+          <p style={{ marginTop: 24, textAlign: "center", fontSize: 13, color: "var(--text-muted)" }}>
             {mode === "login" ? (
               serverInfo?.registrationOpen !== false ? (
                 <>
