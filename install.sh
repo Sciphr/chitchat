@@ -294,13 +294,18 @@ fi
 
 info "Installing dependencies (this may take a minute)..."
 cd "${APP_DIR}/server"
-npm ci --omit=dev --quiet 2>&1 | tail -1
+npm ci --quiet 2>&1 | tail -1
 
 ok "Dependencies installed"
 
 info "Building server..."
 npm run build --quiet 2>&1 | tail -1
 ok "Build complete"
+
+# Remove dev dependencies to save space
+info "Pruning dev dependencies..."
+npm prune --omit=dev --quiet 2>&1 | tail -1
+ok "Dev dependencies removed"
 
 # ─── Create system user ──────────────────────────────────────────────
 
