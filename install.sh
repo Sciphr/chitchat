@@ -344,8 +344,9 @@ else
   echo ""
 
   # Run setup interactively as the chitchat user
+  # Note: </dev/tty is required when running via curl|bash so stdin reads from the terminal
   cd "$DATA_DIR"
-  sudo -u "$SERVICE_USER" node "${APP_DIR}/server/dist/index.js" --setup
+  sudo -u "$SERVICE_USER" node "${APP_DIR}/server/dist/index.js" --setup </dev/tty
 fi
 
 # ─── Auto-configure LiveKit in ChitChat config ───────────────────────
