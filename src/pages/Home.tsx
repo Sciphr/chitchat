@@ -12,14 +12,9 @@ import { useSocket } from "../hooks/useSocket";
 import { useAuth } from "../hooks/useAuth";
 import type { Room, RoomCategory, ServerUser, VoiceControls } from "../types";
 import { playDmNotification, playTextNotification } from "../lib/sounds";
-import { detectGameDetails } from "../lib/gamePresence";
+import { detectRunningGame } from "../lib/gamePresence";
 
 type NotificationMode = "all" | "mentions" | "mute";
-
-type StoredGamePresenceRules = {
-  aliases: Record<string, string>;
-  ignoredExecutables: string[];
-};
 
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -42,6 +37,8 @@ export default function Home() {
     serverUrl,
     servers,
     switchServer,
+    removeServer,
+    signOutServer,
     getServerToken,
   } = useAuth();
   const { socket, isConnected, isReconnecting, reconnect } = useSocket();
@@ -89,23 +86,16 @@ export default function Home() {
   const lastSentGameActivityRef = useRef<string | null>(null);
   const backgroundSocketsRef = useRef<Map<string, Socket>>(new Map());
   const [serverUnreadByUrl, setServerUnreadByUrl] = useState<Record<string, number>>({});
-  const dismissedUnknownGamesRef = useRef<Set<string>>(new Set());
-  const [gamePresenceRules, setGamePresenceRules] = useState<StoredGamePresenceRules>({
-    aliases: {},
-    ignoredExecutables: [],
-  });
-  const [pendingUnknownGame, setPendingUnknownGame] = useState<{
-    executable: string;
-    suggestedName: string;
-  } | null>(null);
-  const [unknownGameLabelInput, setUnknownGameLabelInput] = useState("");
+  const serverHasTokenByUrl = useMemo(() => {
+    const map: Record<string, boolean> = {};
+    for (const server of servers) {
+      map[server.url] = Boolean(getServerToken(server.url));
+    }
+    return map;
+  }, [servers, getServerToken]);
 
   const notificationPrefsStorageKey = useMemo(
     () => `chitchat-notifications:${serverUrl}:${user?.id ?? "anon"}`,
-    [serverUrl, user?.id]
-  );
-  const gamePresenceRulesStorageKey = useMemo(
-    () => `chitchat-game-presence-rules:${serverUrl}:${user?.id ?? "anon"}`,
     [serverUrl, user?.id]
   );
   const selfUserIdRef = useRef<string | null>(null);
@@ -409,43 +399,12 @@ export default function Home() {
   }, [notificationPrefsStorageKey, user?.id]);
 
   useEffect(() => {
-    if (!user?.id) {
-      setGamePresenceRules({ aliases: {}, ignoredExecutables: [] });
-      return;
-    }
-    try {
-      const raw = localStorage.getItem(gamePresenceRulesStorageKey);
-      if (!raw) {
-        setGamePresenceRules({ aliases: {}, ignoredExecutables: [] });
-        return;
-      }
-      const parsed = JSON.parse(raw) as Partial<StoredGamePresenceRules>;
-      setGamePresenceRules({
-        aliases: parsed.aliases || {},
-        ignoredExecutables: Array.isArray(parsed.ignoredExecutables)
-          ? parsed.ignoredExecutables
-          : [],
-      });
-    } catch {
-      setGamePresenceRules({ aliases: {}, ignoredExecutables: [] });
-    }
-  }, [gamePresenceRulesStorageKey, user?.id]);
-
-  useEffect(() => {
     if (!user?.id) return;
     localStorage.setItem(
       notificationPrefsStorageKey,
       JSON.stringify(notificationModesByRoom)
     );
   }, [notificationModesByRoom, notificationPrefsStorageKey, user?.id]);
-
-  useEffect(() => {
-    if (!user?.id) return;
-    localStorage.setItem(
-      gamePresenceRulesStorageKey,
-      JSON.stringify(gamePresenceRules)
-    );
-  }, [gamePresenceRules, gamePresenceRulesStorageKey, user?.id]);
 
   const setRoomNotificationMode = useCallback(
     (roomId: string, mode: NotificationMode) => {
@@ -662,56 +621,14 @@ export default function Home() {
 
     let cancelled = false;
     const emitIfChanged = async () => {
-      const detection = await detectGameDetails();
+      const detectedGame = await detectRunningGame();
       if (cancelled) return;
-      if (detection.kind === "known") {
-        const nextGame = detection.game.trim();
-        if (!nextGame) return;
-        if (nextGame === lastSentGameActivityRef.current) return;
-        lastSentGameActivityRef.current = nextGame;
-        socket.emit("user:activity", { game: nextGame });
-        setPendingUnknownGame(null);
+      const nextGame = detectedGame?.trim() || null;
+      if (nextGame === lastSentGameActivityRef.current) {
         return;
       }
-
-      if (detection.kind === "unknown") {
-        const exe = detection.executable.toLowerCase();
-        const mappedName = gamePresenceRules.aliases[exe];
-        const ignored =
-          gamePresenceRules.ignoredExecutables.includes(exe) ||
-          dismissedUnknownGamesRef.current.has(exe);
-
-        if (mappedName && mappedName.trim()) {
-          const nextGame = mappedName.trim();
-          if (nextGame !== lastSentGameActivityRef.current) {
-            lastSentGameActivityRef.current = nextGame;
-            socket.emit("user:activity", { game: nextGame });
-          }
-          return;
-        }
-
-        if (!ignored) {
-          setPendingUnknownGame((prev) => {
-            if (prev?.executable === exe) return prev;
-            setUnknownGameLabelInput(detection.suggestedName || "Unknown Game");
-            return {
-              executable: exe,
-              suggestedName: detection.suggestedName || "Unknown Game",
-            };
-          });
-        }
-
-        if (lastSentGameActivityRef.current !== null) {
-          lastSentGameActivityRef.current = null;
-          socket.emit("user:activity", { game: null });
-        }
-        return;
-      }
-
-      if (lastSentGameActivityRef.current !== null) {
-        lastSentGameActivityRef.current = null;
-        socket.emit("user:activity", { game: null });
-      }
+      lastSentGameActivityRef.current = nextGame;
+      socket.emit("user:activity", { game: nextGame });
     };
 
     void emitIfChanged();
@@ -727,7 +644,7 @@ export default function Home() {
         lastSentGameActivityRef.current = null;
       }
     };
-  }, [isConnected, socket, user?.id, gamePresenceRules]);
+  }, [isConnected, socket, user?.id]);
 
   useEffect(() => {
     // Clearing active server badge on switch keeps focus on inactive server notifications.
@@ -814,50 +731,6 @@ export default function Home() {
     return Array.from(set);
   }, [serverUsers, profile.username, dmRooms]);
 
-  function handleSaveUnknownGame() {
-    if (!pendingUnknownGame) return;
-    const label = unknownGameLabelInput.trim();
-    if (!label) return;
-    const exe = pendingUnknownGame.executable.toLowerCase();
-    setGamePresenceRules((prev) => {
-      const nextIgnored = prev.ignoredExecutables.filter((entry) => entry !== exe);
-      return {
-        aliases: { ...prev.aliases, [exe]: label },
-        ignoredExecutables: nextIgnored,
-      };
-    });
-    dismissedUnknownGamesRef.current.delete(exe);
-    setPendingUnknownGame(null);
-    setUnknownGameLabelInput("");
-    if (label !== lastSentGameActivityRef.current) {
-      lastSentGameActivityRef.current = label;
-      socket.emit("user:activity", { game: label });
-    }
-  }
-
-  function handleIgnoreUnknownGame() {
-    if (!pendingUnknownGame) return;
-    const exe = pendingUnknownGame.executable.toLowerCase();
-    setGamePresenceRules((prev) => ({
-      aliases: prev.aliases,
-      ignoredExecutables: prev.ignoredExecutables.includes(exe)
-        ? prev.ignoredExecutables
-        : [...prev.ignoredExecutables, exe],
-    }));
-    setPendingUnknownGame(null);
-    setUnknownGameLabelInput("");
-    if (lastSentGameActivityRef.current !== null) {
-      lastSentGameActivityRef.current = null;
-      socket.emit("user:activity", { game: null });
-    }
-  }
-
-  function handleDismissUnknownGame() {
-    if (!pendingUnknownGame) return;
-    dismissedUnknownGamesRef.current.add(pendingUnknownGame.executable.toLowerCase());
-    setPendingUnknownGame(null);
-  }
-
   if (loading || !token) {
     return (
       <div className="flex items-center justify-center flex-1 bg-[var(--bg-primary)]">
@@ -895,7 +768,10 @@ export default function Home() {
           serverProfiles={servers}
           activeServerUrl={serverUrl}
           onSwitchServer={switchServer}
-          onManageServers={() => navigate("/login?manageServers=1")}
+          onAddServer={switchServer}
+          onRemoveServer={removeServer}
+          onSignOutServer={signOutServer}
+          serverHasTokenByUrl={serverHasTokenByUrl}
           serverUnreadByUrl={serverUnreadByUrl}
           isServerConnected={isConnected}
           isServerReconnecting={isReconnecting}
@@ -1032,57 +908,6 @@ export default function Home() {
                 }
           }
         />
-      )}
-      {pendingUnknownGame && (
-        <div
-          className="create-modal-backdrop"
-          onClick={handleDismissUnknownGame}
-        >
-          <div className="create-modal" onClick={(event) => event.stopPropagation()}>
-            <div className="create-modal-title">Unknown Game Detected</div>
-            <p className="create-modal-subtitle">
-              We found an unrecognized game process. Set how it should appear in your status.
-            </p>
-            <div className="game-presence-exe">
-              Executable: <code>{pendingUnknownGame.executable}</code>
-            </div>
-            <label className="create-modal-field-label" htmlFor="unknown-game-label">
-              Display Name
-            </label>
-            <input
-              id="unknown-game-label"
-              type="text"
-              value={unknownGameLabelInput}
-              onChange={(event) => setUnknownGameLabelInput(event.target.value)}
-              placeholder={pendingUnknownGame.suggestedName || "Game name"}
-              className="w-full px-3 py-3 mb-4 text-sm bg-[var(--bg-input)] text-[var(--text-primary)] border border-[var(--border)] rounded-lg outline-none focus:border-[var(--accent)]"
-            />
-            <div className="create-modal-actions">
-              <button
-                type="button"
-                className="profile-button secondary"
-                onClick={handleIgnoreUnknownGame}
-              >
-                Not a game
-              </button>
-              <button
-                type="button"
-                className="profile-button secondary"
-                onClick={handleDismissUnknownGame}
-              >
-                Later
-              </button>
-              <button
-                type="button"
-                className="profile-button"
-                onClick={handleSaveUnknownGame}
-                disabled={!unknownGameLabelInput.trim()}
-              >
-                Save
-              </button>
-            </div>
-          </div>
-        </div>
       )}
     </div>
   );

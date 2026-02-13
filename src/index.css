@@ -333,6 +333,79 @@ body {
   overflow: hidden;
 }
 
+.server-rail {
+  width: 64px;
+  height: 100%;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: linear-gradient(
+    180deg,
+    rgba(22, 22, 34, 0.98),
+    rgba(15, 15, 23, 0.98)
+  );
+  padding: 12px 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.server-rail-item {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 700;
+  transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease;
+}
+
+.server-rail-item:hover {
+  border-color: var(--border-light);
+  color: var(--text-primary);
+}
+
+.server-rail-item.active {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: color-mix(in srgb, white 88%, var(--accent));
+  box-shadow: 0 10px 24px -16px rgba(0, 0, 0, 0.8);
+}
+
+.server-rail-item-label {
+  line-height: 1;
+}
+
+.server-rail-badge {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: rgba(248, 113, 113, 0.95);
+  border: 1px solid rgba(12, 12, 20, 0.9);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.server-rail-manage {
+  margin-top: auto;
+  font-size: 20px;
+  font-weight: 500;
+}
+
 .sidebar-rooms {
   flex: 1;
   overflow-y: auto;
@@ -1536,7 +1609,7 @@ body {
 .chat-message {
   margin: 6px 0;
   position: relative;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .chat-message.own {
@@ -1631,7 +1704,7 @@ body {
 }
 
 .chat-reactions-row {
-  margin-top: 10px;
+  margin-top: 6px;
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
@@ -1663,7 +1736,23 @@ body {
 }
 
 .chat-reaction-add-wrap {
+  position: absolute;
+  top: 2px;
+  right: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+
+.chat-message-content {
   position: relative;
+  padding-right: 32px;
+}
+
+.chat-message:hover .chat-reaction-add-wrap,
+.chat-reaction-add-wrap.open {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .chat-reaction-add {
@@ -1685,8 +1774,8 @@ body {
 
 .chat-reaction-picker {
   position: absolute;
-  left: 0;
-  top: calc(100% + 8px);
+  right: 0;
+  top: calc(100% + 6px);
   z-index: 130;
 }
 

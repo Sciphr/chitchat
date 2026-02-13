@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { useAuth } from "../hooks/useAuth";
 import { setLiveKitUrl } from "../lib/livekit";
 
@@ -12,7 +12,6 @@ interface ServerInfo {
 
 export default function Login() {
   const navigate = useNavigate();
-  const location = useLocation();
   const {
     token,
     loading,
@@ -24,8 +23,9 @@ export default function Login() {
     switchServer,
     saveServer,
     removeServer,
+    signOutServer,
+    getServerToken,
   } = useAuth();
-  const manageServersMode = new URLSearchParams(location.search).get("manageServers") === "1";
 
   const [mode, setMode] = useState<"login" | "register">("login");
   const [email, setEmail] = useState("");
@@ -39,10 +39,10 @@ export default function Login() {
   const [fetchingInfo, setFetchingInfo] = useState(false);
 
   useEffect(() => {
-    if (token && !manageServersMode) {
+    if (token) {
       navigate("/");
     }
-  }, [token, navigate, manageServersMode]);
+  }, [token, navigate]);
 
   // Fetch server info when server URL changes
   const fetchServerInfo = useCallback(async (url: string) => {
@@ -83,6 +83,14 @@ export default function Login() {
     if (trimmedUrl && trimmedUrl !== serverUrl) {
       setServerUrl(trimmedUrl);
       fetchServerInfo(trimmedUrl);
+    }
+  }
+
+  function handleSelectSavedServer(url: string) {
+    switchServer(url);
+    fetchServerInfo(url);
+    if (getServerToken(url)) {
+      navigate("/");
     }
   }
 
@@ -295,33 +303,6 @@ export default function Login() {
                     {serverInfo.name}
                   </p>
                 )}
-                {manageServersMode && servers.length > 0 && (
-                  <div className="mt-2 grid gap-2">
-                    {servers.map((server) => (
-                      <div key={server.url} className="login-server-item">
-                        <button
-                          type="button"
-                          className="login-server-switch"
-                          onClick={() => {
-                            switchServer(server.url);
-                            fetchServerInfo(server.url);
-                          }}
-                        >
-                          <span className="login-server-name">{server.name || server.url}</span>
-                          <span className="login-server-url">{server.url}</span>
-                        </button>
-                        <button
-                          type="button"
-                          className="login-server-remove"
-                          onClick={() => removeServer(server.url)}
-                          title="Remove server"
-                        >
-                          Remove
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
               </div>
 
               {mode === "register" && (
@@ -464,6 +445,60 @@ export default function Login() {
             )}
           </p>
         </div>
+
+        {servers.length > 0 && (
+          <div
+            className="rounded-2xl mt-4"
+            style={{
+              padding: 20,
+              background:
+                "linear-gradient(180deg, rgba(22,22,34,0.86) 0%, rgba(15,15,23,0.92) 100%)",
+              border: "1px solid var(--border)",
+              boxShadow: "0 16px 32px -16px rgba(0,0,0,0.45)",
+            }}
+          >
+            <h2 className="text-sm font-semibold text-white mb-2">Saved servers</h2>
+            <p className="text-[12px] text-(--text-muted) mb-3">
+              Open directly when credentials are saved, or sign in again when logged out.
+            </p>
+            <div className="grid gap-2">
+              {servers.map((server) => {
+                const hasSavedLogin = Boolean(getServerToken(server.url));
+                return (
+                  <div key={server.url} className="login-server-item">
+                    <button
+                      type="button"
+                      className="login-server-switch"
+                      onClick={() => handleSelectSavedServer(server.url)}
+                    >
+                      <span className="login-server-name">{server.name || server.url}</span>
+                      <span className="login-server-url">{server.url}</span>
+                    </button>
+                    {hasSavedLogin ? (
+                      <button
+                        type="button"
+                        className="login-server-remove"
+                        onClick={() => signOutServer(server.url)}
+                        title="Log out of server"
+                      >
+                        Log out
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="login-server-remove"
+                        onClick={() => removeServer(server.url)}
+                        title="Remove server"
+                      >
+                        Remove
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* Footer */}
         <p className="mt-8 text-center text-[11px] tracking-wide text-(--text-muted) opacity-50">

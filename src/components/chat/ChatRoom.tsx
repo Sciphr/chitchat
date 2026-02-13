@@ -906,7 +906,7 @@ export default function ChatRoom({
                     displayName.charAt(0).toUpperCase()
                   )}
                 </div>
-                <div className="min-w-0 flex-1">
+                <div className="min-w-0 flex-1 chat-message-content">
                   <div className="flex items-baseline gap-2">
                     <span className="font-semibold text-sm">
                       {displayName}
@@ -952,47 +952,53 @@ export default function ChatRoom({
                       />
                     </div>
                   )}
-                  <div className="chat-reactions-row">
-                    {(msg.reactions || []).map((reaction) => (
-                      <button
-                        key={`${msg.id}-${reaction.emoji}`}
-                        type="button"
-                        className={`chat-reaction-chip ${
-                          hasCurrentUserReacted(reaction) ? "active" : ""
-                        }`}
-                        onClick={() => toggleReaction(msg.id, reaction)}
-                        title={reaction.user_ids?.length ? `${reaction.user_ids.length} reactions` : "React"}
-                      >
-                        <span>{reaction.emoji}</span>
-                        <span>{reaction.count}</span>
-                      </button>
-                    ))}
-                    <div className="chat-reaction-add-wrap">
-                      <button
-                        type="button"
-                        className="chat-reaction-add"
-                        title="Add reaction"
-                        onClick={() =>
-                          setReactionPickerMessageId((prev) =>
-                            prev === msg.id ? null : msg.id
-                          )
-                        }
-                      >
-                        <SmilePlus size={13} />
-                      </button>
-                      {reactionPickerMessageId === msg.id && (
-                        <div className="chat-reaction-picker" ref={reactionPickerRef}>
-                          <EmojiPicker
-                            onEmojiClick={(value: EmojiClickData) =>
-                              addReactionFromPicker(msg.id, value)
-                            }
-                            theme={Theme.DARK}
-                            skinTonesDisabled
-                            lazyLoadEmojis
-                          />
-                        </div>
-                      )}
+                  {(msg.reactions || []).length > 0 && (
+                    <div className="chat-reactions-row">
+                      {(msg.reactions || []).map((reaction) => (
+                        <button
+                          key={`${msg.id}-${reaction.emoji}`}
+                          type="button"
+                          className={`chat-reaction-chip ${
+                            hasCurrentUserReacted(reaction) ? "active" : ""
+                          }`}
+                          onClick={() => toggleReaction(msg.id, reaction)}
+                          title={reaction.user_ids?.length ? `${reaction.user_ids.length} reactions` : "React"}
+                        >
+                          <span>{reaction.emoji}</span>
+                          <span>{reaction.count}</span>
+                        </button>
+                      ))}
                     </div>
+                  )}
+                  <div
+                    className={`chat-reaction-add-wrap ${
+                      reactionPickerMessageId === msg.id ? "open" : ""
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      className="chat-reaction-add"
+                      title="Add reaction"
+                      onClick={() =>
+                        setReactionPickerMessageId((prev) =>
+                          prev === msg.id ? null : msg.id
+                        )
+                      }
+                    >
+                      <SmilePlus size={13} />
+                    </button>
+                    {reactionPickerMessageId === msg.id && (
+                      <div className="chat-reaction-picker" ref={reactionPickerRef}>
+                        <EmojiPicker
+                          onEmojiClick={(value: EmojiClickData) =>
+                            addReactionFromPicker(msg.id, value)
+                          }
+                          theme={Theme.DARK}
+                          skinTonesDisabled
+                          lazyLoadEmojis
+                        />
+                      </div>
+                    )}
                   </div>
                 </div>
                 {canDelete && (

@@ -44,6 +44,7 @@ interface AuthContext {
   switchServer: (url: string) => void;
   saveServer: (url: string, nameHint?: string) => void;
   removeServer: (url: string) => void;
+  signOutServer: (url: string) => void;
   getServerToken: (url: string) => string | null;
   signInWithPassword: (
     email: string,
@@ -109,19 +110,10 @@ function hostFromUrl(url: string) {
   }
 }
 
-function readSavedServers(activeServerUrl: string): SavedServer[] {
+function readSavedServers(): SavedServer[] {
   try {
     const raw = localStorage.getItem(SERVERS_STORAGE_KEY);
-    if (!raw) {
-      if (!activeServerUrl) return [];
-      return [
-        {
-          url: activeServerUrl,
-          name: hostFromUrl(activeServerUrl),
-          lastUsedAt: new Date().toISOString(),
-        },
-      ];
-    }
+    if (!raw) return [];
     const parsed = JSON.parse(raw) as SavedServer[];
     if (!Array.isArray(parsed)) return [];
     return parsed
@@ -172,7 +164,7 @@ function writeTokensByServer(tokensByServer: Record<string, string>) {
 export function AuthProvider({ children }: { children: ReactNode }) {
   const initialServerUrl = normalizeServerUrl(getServerUrl());
   const [servers, setServers] = useState<SavedServer[]>(() =>
-    readSavedServers(initialServerUrl)
+    readSavedServers()
   );
   const [tokensByServer, setTokensByServer] = useState<Record<string, string>>(() =>
     readTokensByServer(initialServerUrl)
@@ -184,6 +176,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [profile, setProfile] = useState<Profile>(DEFAULT_PROFILE);
   const [loading, setLoading] = useState(true);
   const [serverUrl, setServerUrlState] = useState(initialServerUrl);
+
+  useEffect(() => {
+    if (servers.length > 0) return;
+    const tokenUrls = Object.keys(tokensByServer);
+    if (tokenUrls.length === 0) return;
+    const now = new Date().toISOString();
+    const restored = tokenUrls.map((url) => ({
+      url,
+      name: hostFromUrl(url),
+      lastUsedAt: now,
+    }));
+    setServers(restored);
+    writeSavedServers(restored);
+  }, [servers.length, tokensByServer]);
+
+  useEffect(() => {
+    if (token) return;
+    const fallback = servers.find((entry) => Boolean(tokensByServer[entry.url]));
+    if (!fallback || fallback.url === serverUrl) return;
+    switchToServer(fallback.url, fallback.name);
+  }, [token, servers, tokensByServer, serverUrl]);
 
   function upsertServer(url: string, nameHint?: string) {
     const normalized = normalizeServerUrl(url);
@@ -381,8 +394,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const normalized = normalizeServerUrl(url);
     if (!normalized) return;
 
+    let fallbackServerUrl = "";
     setServers((prev) => {
       const next = prev.filter((entry) => entry.url !== normalized);
+      fallbackServerUrl = next[0]?.url || "";
       writeSavedServers(next);
       return next;
     });
@@ -391,9 +406,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setTokens(nextTokens);
 
     if (serverUrl === normalized) {
-      const fallback = servers.find((entry) => entry.url !== normalized)?.url || "";
-      if (fallback) {
-        switchToServer(fallback);
+      if (fallbackServerUrl) {
+        switchToServer(fallbackServerUrl);
       } else {
         _setServerUrl("");
         setServerUrlState("");
@@ -404,6 +418,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setLoading(false);
         resetSocket();
       }
+    }
+  }
+
+  function signOutServer(url: string) {
+    const normalized = normalizeServerUrl(url);
+    if (!normalized) return;
+    if (!tokensByServer[normalized]) return;
+
+    const nextTokens = { ...tokensByServer };
+    delete nextTokens[normalized];
+    setTokens(nextTokens);
+
+    if (serverUrl === normalized) {
+      setToken(null);
+      setTokenState(null);
+      setUser(null);
+      setProfile(DEFAULT_PROFILE);
+      setLoading(false);
+      resetSocket();
     }
   }
 
@@ -426,6 +459,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         switchServer: switchToServer,
         saveServer,
         removeServer,
+        signOutServer,
         getServerToken,
         signInWithPassword,
         signUp,

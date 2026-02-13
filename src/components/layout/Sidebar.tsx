@@ -49,7 +49,10 @@ interface SidebarProps {
   serverProfiles: Array<{ url: string; name: string }>;
   activeServerUrl: string;
   onSwitchServer: (url: string) => void;
-  onManageServers: () => void;
+  onAddServer: (url: string) => void;
+  onRemoveServer: (url: string) => void;
+  onSignOutServer: (url: string) => void;
+  serverHasTokenByUrl: Record<string, boolean>;
   serverUnreadByUrl: Record<string, number>;
   isServerConnected: boolean;
   isServerReconnecting: boolean;
@@ -82,7 +85,10 @@ export default function Sidebar({
   serverProfiles,
   activeServerUrl,
   onSwitchServer,
-  onManageServers,
+  onAddServer,
+  onRemoveServer,
+  onSignOutServer,
+  serverHasTokenByUrl,
   serverUnreadByUrl,
   isServerConnected,
   isServerReconnecting,
@@ -93,8 +99,9 @@ export default function Sidebar({
   type SidebarContextMenu = {
     x: number;
     y: number;
-    scope: "sidebar" | "category" | "room";
+    scope: "sidebar" | "category" | "room" | "server" | "server-bar";
     categoryId?: string;
+    serverUrl?: string;
     renameKind?: "room" | "category";
     renameId?: string;
     renameName?: string;
@@ -113,6 +120,9 @@ export default function Sidebar({
   } | null>(null);
   const [contextMenu, setContextMenu] = useState<SidebarContextMenu | null>(null);
   const [showSharePicker, setShowSharePicker] = useState(false);
+  const [showAddServer, setShowAddServer] = useState(false);
+  const [addServerUrl, setAddServerUrl] = useState("");
+  const [addServerError, setAddServerError] = useState("");
   const [collapsedCategories, setCollapsedCategories] = useState<Record<string, boolean>>({});
   const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([]);
   const [audioOutputs, setAudioOutputs] = useState<MediaDeviceInfo[]>([]);
@@ -130,8 +140,6 @@ export default function Sidebar({
   });
   const [draggedRoomId, setDraggedRoomId] = useState<string | null>(null);
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
-  const serverMenuRef = useRef<HTMLDivElement | null>(null);
-  const [serverMenuOpen, setServerMenuOpen] = useState(false);
   const CONTEXT_MENU_MARGIN = 8;
 
   const channelRooms = rooms.filter((r) => r.type === "text" || r.type === "voice");
@@ -215,27 +223,6 @@ export default function Sidebar({
       window.removeEventListener("keydown", onEscape);
     };
   }, [contextMenu]);
-
-  useEffect(() => {
-    if (!serverMenuOpen) return;
-    function onClick(event: MouseEvent) {
-      if (
-        serverMenuRef.current &&
-        !serverMenuRef.current.contains(event.target as Node)
-      ) {
-        setServerMenuOpen(false);
-      }
-    }
-    function onEscape(event: KeyboardEvent) {
-      if (event.key === "Escape") setServerMenuOpen(false);
-    }
-    window.addEventListener("mousedown", onClick);
-    window.addEventListener("keydown", onEscape);
-    return () => {
-      window.removeEventListener("mousedown", onClick);
-      window.removeEventListener("keydown", onEscape);
-    };
-  }, [serverMenuOpen]);
 
   useLayoutEffect(() => {
     if (!contextMenu || !contextMenuRef.current) return;
@@ -506,6 +493,29 @@ export default function Sidebar({
     setCreateCategoryId(getSafeCreateCategoryId());
   }
 
+  function openAddServerModal() {
+    setContextMenu(null);
+    setAddServerUrl("");
+    setAddServerError("");
+    setShowAddServer(true);
+  }
+
+  function closeAddServerModal() {
+    setShowAddServer(false);
+    setAddServerUrl("");
+    setAddServerError("");
+  }
+
+  function submitAddServer() {
+    const normalized = addServerUrl.trim().replace(/\/+$/, "");
+    if (!normalized) {
+      setAddServerError("Server address is required.");
+      return;
+    }
+    onAddServer(normalized);
+    closeAddServerModal();
+  }
+
   function handleCreate() {
     const trimmed = newRoomName.trim();
     if (!trimmed) return;
@@ -596,25 +606,81 @@ export default function Sidebar({
     return device.label || `${prefix} ${index + 1}`;
   }
 
-  function formatServerOption(url: string, name: string) {
-    if (!url) return name || "Server";
-    try {
-      const parsed = new URL(url);
-      const host = parsed.host;
-      if (!name || name === host) return host;
-      return `${name} (${host})`;
-    } catch {
-      return name ? `${name} (${url})` : url;
-    }
-  }
-
   function formatServerBadgeCount(count: number) {
     if (count > 99) return "99+";
     return String(count);
   }
 
+  function getServerInitial(name: string, fallbackUrl: string) {
+    const trimmedName = name.trim();
+    if (trimmedName) return trimmedName.charAt(0).toUpperCase();
+    try {
+      const parsed = new URL(fallbackUrl);
+      return parsed.hostname.charAt(0).toUpperCase();
+    } catch {
+      return "S";
+    }
+  }
+
   return (
     <>
+      <aside
+        className="server-rail"
+        aria-label="Servers"
+        onContextMenu={(event) => {
+          if (!(event.target instanceof HTMLElement)) return;
+          if (event.target.closest(".server-rail-item")) return;
+          event.preventDefault();
+          setContextMenu({
+            x: event.clientX,
+            y: event.clientY,
+            scope: "server-bar",
+          });
+        }}
+      >
+        {serverProfiles.map((server) => {
+          const isActive = server.url === activeServerUrl;
+          const unread = serverUnreadByUrl[server.url] ?? 0;
+          return (
+            <button
+              key={server.url}
+              type="button"
+              className={`server-rail-item ${isActive ? "active" : ""}`}
+              onClick={() => onSwitchServer(server.url)}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                setContextMenu({
+                  x: event.clientX,
+                  y: event.clientY,
+                  scope: "server",
+                  serverUrl: server.url,
+                });
+              }}
+              title={server.name || server.url}
+              aria-label={server.name || server.url}
+            >
+              <span className="server-rail-item-label">
+                {getServerInitial(server.name || "", server.url)}
+              </span>
+              {unread > 0 && (
+                <span className="server-rail-badge">
+                  {formatServerBadgeCount(unread)}
+                </span>
+              )}
+            </button>
+          );
+        })}
+        <button
+          type="button"
+          className="server-rail-item server-rail-manage"
+          onClick={openAddServerModal}
+          title="Add server"
+          aria-label="Add server"
+        >
+          +
+        </button>
+      </aside>
+
       <aside className="flex flex-col w-72 h-full sidebar-panel">
         {/* Server header */}
         <div className="sidebar-header">
@@ -647,60 +713,6 @@ export default function Sidebar({
               </button>
             )}
           </div>
-          <div className="sidebar-server-switch" ref={serverMenuRef}>
-            <button
-              type="button"
-              className="sidebar-server-select"
-              onClick={() => setServerMenuOpen((prev) => !prev)}
-              title="Switch server"
-            >
-              <span className="sidebar-server-select-label">
-                {formatServerOption(
-                  activeServerUrl,
-                  serverProfiles.find((server) => server.url === activeServerUrl)?.name ||
-                    serverName
-                )}
-              </span>
-              <ChevronDown size={14} />
-            </button>
-            <button
-              type="button"
-              className="sidebar-server-manage"
-              onClick={onManageServers}
-              title="Manage servers"
-            >
-              Manage
-            </button>
-            {serverMenuOpen && (
-              <div className="sidebar-server-menu">
-                {serverProfiles.map((server) => {
-                  const unread = serverUnreadByUrl[server.url] ?? 0;
-                  return (
-                    <button
-                      key={server.url}
-                      type="button"
-                      className={`sidebar-server-menu-item ${
-                        server.url === activeServerUrl ? "active" : ""
-                      }`}
-                      onClick={() => {
-                        onSwitchServer(server.url);
-                        setServerMenuOpen(false);
-                      }}
-                    >
-                      <span className="sidebar-server-menu-text">
-                        {formatServerOption(server.url, server.name)}
-                      </span>
-                      {unread > 0 && (
-                        <span className="sidebar-server-menu-badge">
-                          {formatServerBadgeCount(unread)}
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-          </div>
         </div>
 
       {/* Create modal */}
@@ -720,8 +732,8 @@ export default function Sidebar({
             <div className="create-toggle" role="group" aria-label="Create type">
               <button
                 type="button"
-                className={`create-toggle-option ${
-                  createEntity === "channel" ? "active" : ""
+              className={`create-toggle-option ${
+                    createEntity === "channel" ? "active" : ""
                 }`}
                 onClick={() => setCreateEntity("channel")}
               >
@@ -805,13 +817,20 @@ export default function Sidebar({
         </div>
       )}
 
-      {contextMenu && (canCreateRooms || canManageChannels) && (
+      {contextMenu &&
+        (contextMenu.scope === "server" ||
+          contextMenu.scope === "server-bar" ||
+          canCreateRooms ||
+          canManageChannels) && (
         <div
           ref={contextMenuRef}
           className="sidebar-context-menu"
           style={{ top: contextMenu.y, left: contextMenu.x }}
         >
-          {canCreateRooms && (
+          {(contextMenu.scope === "sidebar" ||
+            contextMenu.scope === "category" ||
+            contextMenu.scope === "room") &&
+            canCreateRooms && (
             <>
               <button
                 type="button"
@@ -829,7 +848,8 @@ export default function Sidebar({
               </button>
             </>
           )}
-          {canManageChannels &&
+          {(contextMenu.scope === "sidebar" || contextMenu.scope === "category") &&
+            canManageChannels &&
             (contextMenu.scope === "sidebar" || contextMenu.scope === "category") && (
               <button
                 type="button"
@@ -839,7 +859,8 @@ export default function Sidebar({
                 Create category
               </button>
             )}
-          {canManageChannels &&
+          {(contextMenu.scope === "room" || contextMenu.scope === "category") &&
+            canManageChannels &&
             (contextMenu.renameKind === "category" || contextMenu.renameKind === "room") && (
               <button
                 type="button"
@@ -851,6 +872,89 @@ export default function Sidebar({
                   : "Rename channel"}
               </button>
             )}
+          {(contextMenu.scope === "server" || contextMenu.scope === "server-bar") && (
+            <button
+              type="button"
+              className="sidebar-context-menu-item"
+              onClick={() => {
+                openAddServerModal();
+                setContextMenu(null);
+              }}
+            >
+              Add server
+            </button>
+          )}
+          {contextMenu.scope === "server" &&
+            contextMenu.serverUrl &&
+            serverHasTokenByUrl[contextMenu.serverUrl] && (
+              <button
+                type="button"
+                className="sidebar-context-menu-item"
+                onClick={() => {
+                  onSignOutServer(contextMenu.serverUrl!);
+                  setContextMenu(null);
+                }}
+              >
+                Log out of server
+              </button>
+            )}
+          {contextMenu.scope === "server" && contextMenu.serverUrl && (
+            <button
+              type="button"
+              className="sidebar-context-menu-item"
+              onClick={() => {
+                onRemoveServer(contextMenu.serverUrl!);
+                setContextMenu(null);
+              }}
+            >
+              Remove server
+            </button>
+          )}
+        </div>
+      )}
+
+      {showAddServer && (
+        <div className="create-modal-backdrop" onClick={closeAddServerModal}>
+          <div className="create-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="create-modal-title">Add Server</div>
+            <p className="create-modal-subtitle">
+              Enter a server address to connect.
+            </p>
+            <label className="create-modal-field-label" htmlFor="add-server-url">
+              Server Address
+            </label>
+            <input
+              id="add-server-url"
+              type="text"
+              value={addServerUrl}
+              onChange={(event) => {
+                setAddServerUrl(event.target.value);
+                if (addServerError) setAddServerError("");
+              }}
+              placeholder="https://chat.example.com"
+              className="w-full px-3 py-3 mb-2 text-sm bg-[var(--bg-input)] text-[var(--text-primary)] border border-[var(--border)] rounded-lg outline-none focus:border-[var(--accent)]"
+              autoFocus
+            />
+            {addServerError && (
+              <p className="text-xs text-[var(--danger)] mb-3">{addServerError}</p>
+            )}
+            <div className="create-modal-actions">
+              <button
+                type="button"
+                onClick={closeAddServerModal}
+                className="profile-button secondary"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={submitAddServer}
+                className="profile-button"
+              >
+                Connect
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
