@@ -1,5 +1,6 @@
-import { useMemo, useRef, useState } from "react";
-import { Paperclip, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import EmojiPicker, { type EmojiClickData, Theme } from "emoji-picker-react";
+import { Paperclip, SmilePlus, X } from "lucide-react";
 import { getServerUrl, getToken } from "../../lib/api";
 import type { MessageAttachment } from "../../types";
 
@@ -50,9 +51,11 @@ export default function MessageInput({
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [activeMention, setActiveMention] = useState<ActiveMention | null>(null);
   const [mentionMenuIndex, setMentionMenuIndex] = useState(0);
+  const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const messageInputRef = useRef<HTMLInputElement | null>(null);
   const activeUploadRequestRef = useRef<XMLHttpRequest | null>(null);
+  const emojiPickerRef = useRef<HTMLDivElement | null>(null);
 
   const mentionSuggestions = useMemo(() => {
     if (!activeMention) return [];
@@ -71,6 +74,20 @@ export default function MessageInput({
     });
     return filtered.slice(0, 6);
   }, [mentionUsernames, activeMention]);
+
+  useEffect(() => {
+    if (!emojiPickerOpen) return;
+    function onDocumentClick(event: MouseEvent) {
+      if (
+        emojiPickerRef.current &&
+        !emojiPickerRef.current.contains(event.target as Node)
+      ) {
+        setEmojiPickerOpen(false);
+      }
+    }
+    window.addEventListener("mousedown", onDocumentClick);
+    return () => window.removeEventListener("mousedown", onDocumentClick);
+  }, [emojiPickerOpen]);
 
   function formatBytes(size: number) {
     if (size < 1024) return `${size} B`;
@@ -173,6 +190,7 @@ export default function MessageInput({
       await onSend(trimmed, attachments);
       setMessage("");
       setActiveMention(null);
+      setEmojiPickerOpen(false);
       setSelectedFiles([]);
       if (fileInputRef.current) {
         fileInputRef.current.value = "";
@@ -210,6 +228,27 @@ export default function MessageInput({
       messageInputRef.current?.focus();
       messageInputRef.current?.setSelectionRange(cursor, cursor);
     });
+  }
+
+  function insertEmoji(emoji: string) {
+    const input = messageInputRef.current;
+    const start = input?.selectionStart ?? message.length;
+    const end = input?.selectionEnd ?? message.length;
+    const before = message.slice(0, start);
+    const after = message.slice(end);
+    const next = `${before}${emoji}${after}`;
+    setMessage(next);
+    onTypingChange?.(next.trim().length > 0);
+    requestAnimationFrame(() => {
+      const cursor = start + emoji.length;
+      input?.focus();
+      input?.setSelectionRange(cursor, cursor);
+    });
+  }
+
+  function onEmojiSelect(value: EmojiClickData) {
+    insertEmoji(value.emoji);
+    setEmojiPickerOpen(false);
   }
 
   return (
@@ -271,6 +310,27 @@ export default function MessageInput({
         >
           <Paperclip size={16} />
         </button>
+        <div className="chat-emoji-wrap" ref={emojiPickerRef}>
+          <button
+            type="button"
+            className="chat-emoji-btn"
+            onClick={() => setEmojiPickerOpen((prev) => !prev)}
+            disabled={disabled || uploading}
+            title="Insert emoji"
+          >
+            <SmilePlus size={16} />
+          </button>
+          {emojiPickerOpen && (
+            <div className="chat-emoji-picker">
+              <EmojiPicker
+                onEmojiClick={onEmojiSelect}
+                theme={Theme.DARK}
+                skinTonesDisabled
+                lazyLoadEmojis
+              />
+            </div>
+          )}
+        </div>
 
         <input
           ref={messageInputRef}

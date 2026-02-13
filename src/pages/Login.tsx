@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../hooks/useAuth";
 import { setLiveKitUrl } from "../lib/livekit";
 
@@ -12,6 +12,7 @@ interface ServerInfo {
 
 export default function Login() {
   const navigate = useNavigate();
+  const location = useLocation();
   const {
     token,
     loading,
@@ -19,7 +20,12 @@ export default function Login() {
     signUp,
     serverUrl,
     setServerUrl,
+    servers,
+    switchServer,
+    saveServer,
+    removeServer,
   } = useAuth();
+  const manageServersMode = new URLSearchParams(location.search).get("manageServers") === "1";
 
   const [mode, setMode] = useState<"login" | "register">("login");
   const [email, setEmail] = useState("");
@@ -33,10 +39,10 @@ export default function Login() {
   const [fetchingInfo, setFetchingInfo] = useState(false);
 
   useEffect(() => {
-    if (token) {
+    if (token && !manageServersMode) {
       navigate("/");
     }
-  }, [token, navigate]);
+  }, [token, navigate, manageServersMode]);
 
   // Fetch server info when server URL changes
   const fetchServerInfo = useCallback(async (url: string) => {
@@ -47,6 +53,7 @@ export default function Login() {
       if (res.ok) {
         const data = await res.json();
         setServerInfo(data);
+        saveServer(url, data.name || undefined);
         // Persist LiveKit URL so voice/video connects to the right server
         if (data.livekitUrl) {
           setLiveKitUrl(data.livekitUrl);
@@ -66,6 +73,10 @@ export default function Login() {
       fetchServerInfo(serverUrl);
     }
   }, [serverUrl, fetchServerInfo]);
+
+  useEffect(() => {
+    setLocalServerUrl(serverUrl);
+  }, [serverUrl]);
 
   function handleServerUrlBlur() {
     const trimmedUrl = localServerUrl.trim().replace(/\/+$/, "");
@@ -283,6 +294,33 @@ export default function Login() {
                   <p className="mt-1 text-[11px] text-(--accent)">
                     {serverInfo.name}
                   </p>
+                )}
+                {manageServersMode && servers.length > 0 && (
+                  <div className="mt-2 grid gap-2">
+                    {servers.map((server) => (
+                      <div key={server.url} className="login-server-item">
+                        <button
+                          type="button"
+                          className="login-server-switch"
+                          onClick={() => {
+                            switchServer(server.url);
+                            fetchServerInfo(server.url);
+                          }}
+                        >
+                          <span className="login-server-name">{server.name || server.url}</span>
+                          <span className="login-server-url">{server.url}</span>
+                        </button>
+                        <button
+                          type="button"
+                          className="login-server-remove"
+                          onClick={() => removeServer(server.url)}
+                          title="Remove server"
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    ))}
+                  </div>
                 )}
               </div>
 

@@ -13,7 +13,7 @@ interface SocketContextValue {
 const SocketContext = createContext<SocketContextValue | null>(null);
 
 export function SocketProvider({ children }: { children: ReactNode }) {
-  const { token } = useAuth();
+  const { token, serverUrl } = useAuth();
   const [isConnected, setIsConnected] = useState(false);
   const [isReconnecting, setIsReconnecting] = useState(false);
 
@@ -67,7 +67,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       socket.off("disconnect", onDisconnect);
       socket.off("connect_error", onConnectError);
     };
-  }, [token]);
+  }, [token, serverUrl]);
 
   const reconnect = useCallback(() => {
     const socket = getSocket();
@@ -77,7 +77,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     setIsConnected(false);
     setIsReconnecting(true);
     connectSocket();
-  }, [token]);
+  }, [token, serverUrl]);
 
   const value = useMemo(
     () => ({ socket: getSocket(), isConnected, isReconnecting, reconnect }),

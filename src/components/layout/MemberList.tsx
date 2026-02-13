@@ -1,6 +1,7 @@
 import {
   type MouseEvent as ReactMouseEvent,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -17,6 +18,16 @@ interface MemberListProps {
   currentUserId: string | null;
   onUserClick: (user: ServerUser) => void;
   onViewProfile: (user: ServerUser) => void;
+  activeCall: {
+    roomId: string;
+    ownerUserId: string;
+    participantIds: string[];
+  } | null;
+  onStartCall: (user: ServerUser) => void;
+  onAddToCall: (user: ServerUser) => void;
+  onRemoveFromCall: (user: ServerUser) => void;
+  onEndCall: () => void;
+  onLeaveCall: () => void;
   onToggle: () => void;
 }
 
@@ -67,7 +78,12 @@ function MemberItem({
           style={{ background: STATUS_COLORS[user.status] || STATUS_COLORS.offline }}
         />
       </div>
-      <span className="member-name">{user.username}</span>
+      <span className="member-meta">
+        <span className="member-name">{user.username}</span>
+        {user.activity_game && user.status !== "offline" && (
+          <span className="member-activity">Playing {user.activity_game}</span>
+        )}
+      </span>
       {isInVoice && <Mic size={14} className="member-voice-icon" />}
       {!isSelf && (
         <span
@@ -93,6 +109,12 @@ export default function MemberList({
   currentUserId,
   onUserClick,
   onViewProfile,
+  activeCall,
+  onStartCall,
+  onAddToCall,
+  onRemoveFromCall,
+  onEndCall,
+  onLeaveCall,
   onToggle,
 }: MemberListProps) {
   const [offlineCollapsed, setOfflineCollapsed] = useState(false);
@@ -103,6 +125,34 @@ export default function MemberList({
     isSelf: boolean;
   } | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const CONTEXT_MENU_MARGIN = 8;
+
+  useLayoutEffect(() => {
+    if (!contextMenu || !menuRef.current) return;
+
+    const rect = menuRef.current.getBoundingClientRect();
+    const maxX = window.innerWidth - CONTEXT_MENU_MARGIN;
+    const maxY = window.innerHeight - CONTEXT_MENU_MARGIN;
+    let nextX = contextMenu.x;
+    let nextY = contextMenu.y;
+
+    if (rect.right > maxX) {
+      nextX -= rect.right - maxX;
+    }
+    if (rect.bottom > maxY) {
+      nextY -= rect.bottom - maxY;
+    }
+    if (rect.left < CONTEXT_MENU_MARGIN) {
+      nextX += CONTEXT_MENU_MARGIN - rect.left;
+    }
+    if (rect.top < CONTEXT_MENU_MARGIN) {
+      nextY += CONTEXT_MENU_MARGIN - rect.top;
+    }
+
+    if (nextX !== contextMenu.x || nextY !== contextMenu.y) {
+      setContextMenu((prev) => (prev ? { ...prev, x: nextX, y: nextY } : prev));
+    }
+  }, [contextMenu]);
 
   useEffect(() => {
     function closeMenu(event: MouseEvent) {
@@ -119,13 +169,20 @@ export default function MemberList({
       if (event.key === "Escape") setContextMenu(null);
     }
 
+    function clampOnResize() {
+      if (!contextMenu) return;
+      setContextMenu((prev) => (prev ? { ...prev } : prev));
+    }
+
     window.addEventListener("mousedown", closeMenu);
     window.addEventListener("keydown", closeOnEscape);
+    window.addEventListener("resize", clampOnResize);
     return () => {
       window.removeEventListener("mousedown", closeMenu);
       window.removeEventListener("keydown", closeOnEscape);
+      window.removeEventListener("resize", clampOnResize);
     };
-  }, []);
+  }, [contextMenu]);
 
   // Build a set of user IDs currently in any voice channel
   const voiceUserIds = useMemo(() => {
@@ -161,6 +218,9 @@ export default function MemberList({
 
   const onlineCount =
     grouped.online.length + grouped.away.length + grouped.dnd.length;
+  const isCallOwner = Boolean(
+    activeCall && currentUserId && activeCall.ownerUserId === currentUserId
+  );
 
   return (
     <aside className="member-list-panel">
@@ -270,6 +330,57 @@ export default function MemberList({
               }}
             >
               Send Direct Message
+            </button>
+          )}
+          {!contextMenu.isSelf && (
+            !activeCall ? (
+              <button
+                type="button"
+                className="member-context-menu-item"
+                onClick={() => {
+                  onStartCall(contextMenu.user);
+                  setContextMenu(null);
+                }}
+              >
+                Start Call
+              </button>
+            ) : activeCall.participantIds.includes(contextMenu.user.id) ? (
+              isCallOwner ? (
+                <button
+                  type="button"
+                  className="member-context-menu-item"
+                  onClick={() => {
+                    onRemoveFromCall(contextMenu.user);
+                    setContextMenu(null);
+                  }}
+                >
+                  Remove from Call
+                </button>
+              ) : null
+            ) : isCallOwner ? (
+              <button
+                type="button"
+                className="member-context-menu-item"
+                onClick={() => {
+                  onAddToCall(contextMenu.user);
+                  setContextMenu(null);
+                }}
+              >
+                Add to Call
+              </button>
+            ) : null
+          )}
+          {contextMenu.isSelf && activeCall && (
+            <button
+              type="button"
+              className="member-context-menu-item"
+              onClick={() => {
+                if (isCallOwner) onEndCall();
+                else onLeaveCall();
+                setContextMenu(null);
+              }}
+            >
+              {isCallOwner ? "End Call" : "Leave Call"}
             </button>
           )}
           <button

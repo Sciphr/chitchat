@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
+import EmojiPicker, { type EmojiClickData, Theme } from "emoji-picker-react";
 import {
   ArrowDownCircle,
   AtSign,
@@ -8,8 +9,9 @@ import {
   Download,
   ImageIcon,
   MessageSquare,
+  SmilePlus,
 } from "lucide-react";
-import type { Message, MessageAttachment, Room } from "../../types";
+import type { Message, MessageAttachment, MessageReaction, Room } from "../../types";
 import MessageInput from "./MessageInput";
 import type { Socket } from "socket.io-client";
 import { getServerUrl, getToken } from "../../lib/api";
@@ -347,7 +349,9 @@ export default function ChatRoom({
   const typingActiveRef = useRef(false);
   const typingStopTimerRef = useRef<number | null>(null);
   const notificationMenuRef = useRef<HTMLDivElement | null>(null);
+  const reactionPickerRef = useRef<HTMLDivElement | null>(null);
   const [notificationMenuOpen, setNotificationMenuOpen] = useState(false);
+  const [reactionPickerMessageId, setReactionPickerMessageId] = useState<string | null>(null);
 
   const firstUnreadIndex = useMemo(() => {
     if (!firstUnreadAt || unreadCount <= 0) return -1;
@@ -397,6 +401,25 @@ export default function ChatRoom({
       setMessages((prev) => prev.filter((msg) => msg.id !== messageId));
     }
 
+    function onReactionUpdate({
+      messageId,
+      reactions,
+    }: {
+      messageId: string;
+      reactions: MessageReaction[];
+    }) {
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === messageId
+            ? {
+                ...msg,
+                reactions: reactions || [],
+              }
+            : msg
+        )
+      );
+    }
+
     function onSystemMessage({ content }: { content: string }) {
       shouldScrollRef.current = true;
       const systemMsg: Message = {
@@ -443,6 +466,7 @@ export default function ChatRoom({
     socket.on("message:new", onMessage);
     socket.on("message:history", onHistory);
     socket.on("message:deleted", onDeleted);
+    socket.on("message:reaction:update", onReactionUpdate);
     socket.on("message:system", onSystemMessage);
     socket.on("typing:start", onTypingStart);
     socket.on("typing:stop", onTypingStop);
@@ -461,6 +485,7 @@ export default function ChatRoom({
       socket.off("message:new", onMessage);
       socket.off("message:history", onHistory);
       socket.off("message:deleted", onDeleted);
+      socket.off("message:reaction:update", onReactionUpdate);
       socket.off("message:system", onSystemMessage);
       socket.off("typing:start", onTypingStart);
       socket.off("typing:stop", onTypingStop);
@@ -666,6 +691,33 @@ export default function ChatRoom({
     }
   }
 
+  function hasCurrentUserReacted(reaction: MessageReaction) {
+    if (!currentUserId) return false;
+    return (reaction.user_ids || []).includes(currentUserId);
+  }
+
+  function setReaction(messageId: string, emoji: string, active: boolean) {
+    socket.emit(
+      "message:reaction:set",
+      { messageId, emoji, active },
+      (ack?: { ok: boolean; error?: string }) => {
+        if (ack && !ack.ok) {
+          setSendError(ack.error || "Failed to update reaction.");
+        }
+      }
+    );
+  }
+
+  function toggleReaction(messageId: string, reaction: MessageReaction) {
+    const isActive = hasCurrentUserReacted(reaction);
+    setReaction(messageId, reaction.emoji, !isActive);
+  }
+
+  function addReactionFromPicker(messageId: string, value: EmojiClickData) {
+    setReaction(messageId, value.emoji, true);
+    setReactionPickerMessageId(null);
+  }
+
   const typingNames = Object.values(typingUsers);
   const typingLabel =
     typingNames.length === 0
@@ -689,6 +741,20 @@ export default function ChatRoom({
     window.addEventListener("mousedown", onDocumentClick);
     return () => window.removeEventListener("mousedown", onDocumentClick);
   }, [notificationMenuOpen]);
+
+  useEffect(() => {
+    if (!reactionPickerMessageId) return;
+    function onDocumentClick(event: MouseEvent) {
+      if (
+        reactionPickerRef.current &&
+        !reactionPickerRef.current.contains(event.target as Node)
+      ) {
+        setReactionPickerMessageId(null);
+      }
+    }
+    window.addEventListener("mousedown", onDocumentClick);
+    return () => window.removeEventListener("mousedown", onDocumentClick);
+  }, [reactionPickerMessageId]);
 
   const notificationLabel =
     notificationMode === "mute"
@@ -886,6 +952,48 @@ export default function ChatRoom({
                       />
                     </div>
                   )}
+                  <div className="chat-reactions-row">
+                    {(msg.reactions || []).map((reaction) => (
+                      <button
+                        key={`${msg.id}-${reaction.emoji}`}
+                        type="button"
+                        className={`chat-reaction-chip ${
+                          hasCurrentUserReacted(reaction) ? "active" : ""
+                        }`}
+                        onClick={() => toggleReaction(msg.id, reaction)}
+                        title={reaction.user_ids?.length ? `${reaction.user_ids.length} reactions` : "React"}
+                      >
+                        <span>{reaction.emoji}</span>
+                        <span>{reaction.count}</span>
+                      </button>
+                    ))}
+                    <div className="chat-reaction-add-wrap">
+                      <button
+                        type="button"
+                        className="chat-reaction-add"
+                        title="Add reaction"
+                        onClick={() =>
+                          setReactionPickerMessageId((prev) =>
+                            prev === msg.id ? null : msg.id
+                          )
+                        }
+                      >
+                        <SmilePlus size={13} />
+                      </button>
+                      {reactionPickerMessageId === msg.id && (
+                        <div className="chat-reaction-picker" ref={reactionPickerRef}>
+                          <EmojiPicker
+                            onEmojiClick={(value: EmojiClickData) =>
+                              addReactionFromPicker(msg.id, value)
+                            }
+                            theme={Theme.DARK}
+                            skinTonesDisabled
+                            lazyLoadEmojis
+                          />
+                        </div>
+                      )}
+                    </div>
+                  </div>
                 </div>
                 {canDelete && (
                   <button

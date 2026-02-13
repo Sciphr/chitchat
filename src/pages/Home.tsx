@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { io, type Socket } from "socket.io-client";
 import { ChevronLeft } from "lucide-react";
 import Sidebar from "../components/layout/Sidebar";
 import MemberList from "../components/layout/MemberList";
@@ -9,10 +10,16 @@ import VoiceChannel from "../components/voice/VoiceChannel";
 import Settings from "./Settings";
 import { useSocket } from "../hooks/useSocket";
 import { useAuth } from "../hooks/useAuth";
-import type { Room, ServerUser, VoiceControls } from "../types";
+import type { Room, RoomCategory, ServerUser, VoiceControls } from "../types";
 import { playDmNotification, playTextNotification } from "../lib/sounds";
+import { detectGameDetails } from "../lib/gamePresence";
 
 type NotificationMode = "all" | "mentions" | "mute";
+
+type StoredGamePresenceRules = {
+  aliases: Record<string, string>;
+  ignoredExecutables: string[];
+};
 
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -26,9 +33,20 @@ function hasUserMention(content: string, username: string) {
 
 export default function Home() {
   const navigate = useNavigate();
-  const { token, user, profile, loading, signOut, serverUrl } = useAuth();
+  const {
+    token,
+    user,
+    profile,
+    loading,
+    signOut,
+    serverUrl,
+    servers,
+    switchServer,
+    getServerToken,
+  } = useAuth();
   const { socket, isConnected, isReconnecting, reconnect } = useSocket();
   const [rooms, setRooms] = useState<Room[]>([]);
+  const [categories, setCategories] = useState<RoomCategory[]>([]);
   const [dmRooms, setDmRooms] = useState<Room[]>([]);
   const [activeRoom, setActiveRoom] = useState<Room | null>(null);
   const [serverUsers, setServerUsers] = useState<ServerUser[]>([]);
@@ -56,12 +74,45 @@ export default function Home() {
   const [notificationModesByRoom, setNotificationModesByRoom] = useState<
     Record<string, NotificationMode>
   >({});
+  const [activeCall, setActiveCall] = useState<{
+    room: Room;
+    ownerUserId: string;
+    participantIds: string[];
+  } | null>(null);
+  const [serverInfo, setServerInfo] = useState<{
+    name: string;
+    maintenanceMode: boolean;
+    userCanCreateRooms?: boolean;
+  } | null>(null);
   const lastNotificationSoundAtRef = useRef(0);
+  const lastNonCallRoomRef = useRef<Room | null>(null);
+  const lastSentGameActivityRef = useRef<string | null>(null);
+  const backgroundSocketsRef = useRef<Map<string, Socket>>(new Map());
+  const [serverUnreadByUrl, setServerUnreadByUrl] = useState<Record<string, number>>({});
+  const dismissedUnknownGamesRef = useRef<Set<string>>(new Set());
+  const [gamePresenceRules, setGamePresenceRules] = useState<StoredGamePresenceRules>({
+    aliases: {},
+    ignoredExecutables: [],
+  });
+  const [pendingUnknownGame, setPendingUnknownGame] = useState<{
+    executable: string;
+    suggestedName: string;
+  } | null>(null);
+  const [unknownGameLabelInput, setUnknownGameLabelInput] = useState("");
 
   const notificationPrefsStorageKey = useMemo(
     () => `chitchat-notifications:${serverUrl}:${user?.id ?? "anon"}`,
     [serverUrl, user?.id]
   );
+  const gamePresenceRulesStorageKey = useMemo(
+    () => `chitchat-game-presence-rules:${serverUrl}:${user?.id ?? "anon"}`,
+    [serverUrl, user?.id]
+  );
+  const selfUserIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    selfUserIdRef.current = user?.id ?? null;
+  }, [user?.id]);
 
   function toggleMemberList() {
     setMemberListOpen((prev) => {
@@ -77,6 +128,35 @@ export default function Home() {
       navigate("/login");
     }
   }, [loading, token, navigate]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadServerInfo() {
+      try {
+        const res = await fetch(`${serverUrl}/api/server/info`);
+        if (!res.ok) return;
+        const data = (await res.json()) as {
+          name?: string;
+          maintenanceMode?: boolean;
+          userCanCreateRooms?: boolean;
+        };
+        if (cancelled) return;
+        setServerInfo({
+          name: data.name || "Server",
+          maintenanceMode: Boolean(data.maintenanceMode),
+          userCanCreateRooms: data.userCanCreateRooms,
+        });
+      } catch {
+        if (!cancelled) {
+          setServerInfo((prev) => prev ?? { name: "Server", maintenanceMode: false });
+        }
+      }
+    }
+    void loadServerInfo();
+    return () => {
+      cancelled = true;
+    };
+  }, [serverUrl]);
 
   // Identify user to server when connected
   useEffect(() => {
@@ -96,7 +176,21 @@ export default function Home() {
     function onRooms(serverRooms: Room[]) {
       if (serverRooms.length > 0) {
         setRooms(serverRooms);
+        setCategories((prev) =>
+          prev.length > 0
+            ? prev
+            : [
+                {
+                  id: "default",
+                  name: "Channels",
+                  position: 0,
+                  enforce_type_order: 1,
+                  created_at: new Date(0).toISOString(),
+                },
+              ]
+        );
         setActiveRoom((prev) => {
+          if (prev?.is_temporary) return prev;
           if (prev && serverRooms.some((room) => room.id === prev.id))
             return prev;
           // Don't auto-select if currently viewing a DM
@@ -106,11 +200,29 @@ export default function Home() {
       }
     }
 
+    function onStructure(payload: { categories: RoomCategory[]; rooms: Room[] }) {
+      if (!payload?.rooms) return;
+      const serverRooms = payload.rooms;
+      setCategories(payload.categories || []);
+      setRooms(serverRooms);
+      if (serverRooms.length > 0) {
+        setActiveRoom((prev) => {
+          if (prev?.is_temporary) return prev;
+          if (prev && serverRooms.some((room) => room.id === prev.id))
+            return prev;
+          if (prev?.type === "dm") return prev;
+          return serverRooms[0];
+        });
+      }
+    }
+
     socket.on("rooms:list", onRooms);
+    socket.on("rooms:structure", onStructure);
     socket.emit("rooms:get");
 
     return () => {
       socket.off("rooms:list", onRooms);
+      socket.off("rooms:structure", onStructure);
     };
   }, [isConnected, socket]);
 
@@ -154,8 +266,69 @@ export default function Home() {
     };
   }, [isConnected, socket]);
 
-  function handleCreateRoom(name: string, type: "text" | "voice") {
-    socket.emit("room:create", { name, type });
+  function handleCreateRoom(
+    name: string,
+    type: "text" | "voice",
+    categoryId?: string
+  ) {
+    socket.emit("room:create", { name, type, categoryId });
+  }
+
+  function handleCreateCategory(name: string) {
+    socket.emit("category:create", { name });
+  }
+
+  function handleLayoutUpdate(payload: {
+    categories: Array<{ id: string; position: number; enforceTypeOrder: boolean }>;
+    rooms: Array<{ id: string; categoryId: string; position: number }>;
+  }) {
+    socket.emit("layout:update", payload);
+  }
+
+  function handleRenameRoom(roomId: string, name: string) {
+    socket.emit("room:rename", { roomId, name });
+  }
+
+  function handleRenameCategory(categoryId: string, name: string) {
+    socket.emit("category:rename", { categoryId, name });
+  }
+
+  function handleStartCall(targetUser: ServerUser) {
+    if (!targetUser || targetUser.id === user?.id) return;
+    socket.emit(
+      "call:start",
+      { targetUserId: targetUser.id },
+      (ack?: { ok: boolean; room?: Room }) => {
+        if (!ack?.ok || !ack.room) return;
+        setActiveCall((prev) => ({
+          room: ack.room as Room,
+          ownerUserId: user?.id || "",
+          participantIds: prev?.participantIds || [user?.id || "", targetUser.id].filter(Boolean),
+        }));
+        setActiveRoom(ack.room);
+        setPendingAutoJoinVoiceRoomId(ack.room.id);
+      }
+    );
+  }
+
+  function handleAddToCall(targetUser: ServerUser) {
+    if (!activeCall) return;
+    socket.emit("call:addParticipant", { roomId: activeCall.room.id, userId: targetUser.id });
+  }
+
+  function handleRemoveFromCall(targetUser: ServerUser) {
+    if (!activeCall) return;
+    socket.emit("call:removeParticipant", { roomId: activeCall.room.id, userId: targetUser.id });
+  }
+
+  function handleEndCall() {
+    if (!activeCall) return;
+    socket.emit("call:end", { roomId: activeCall.room.id });
+  }
+
+  function handleLeaveCall() {
+    if (!activeCall) return;
+    socket.emit("call:leave", { roomId: activeCall.room.id });
   }
 
   const handleParticipantsChange = useCallback(
@@ -236,6 +409,29 @@ export default function Home() {
   }, [notificationPrefsStorageKey, user?.id]);
 
   useEffect(() => {
+    if (!user?.id) {
+      setGamePresenceRules({ aliases: {}, ignoredExecutables: [] });
+      return;
+    }
+    try {
+      const raw = localStorage.getItem(gamePresenceRulesStorageKey);
+      if (!raw) {
+        setGamePresenceRules({ aliases: {}, ignoredExecutables: [] });
+        return;
+      }
+      const parsed = JSON.parse(raw) as Partial<StoredGamePresenceRules>;
+      setGamePresenceRules({
+        aliases: parsed.aliases || {},
+        ignoredExecutables: Array.isArray(parsed.ignoredExecutables)
+          ? parsed.ignoredExecutables
+          : [],
+      });
+    } catch {
+      setGamePresenceRules({ aliases: {}, ignoredExecutables: [] });
+    }
+  }, [gamePresenceRulesStorageKey, user?.id]);
+
+  useEffect(() => {
     if (!user?.id) return;
     localStorage.setItem(
       notificationPrefsStorageKey,
@@ -243,12 +439,49 @@ export default function Home() {
     );
   }, [notificationModesByRoom, notificationPrefsStorageKey, user?.id]);
 
+  useEffect(() => {
+    if (!user?.id) return;
+    localStorage.setItem(
+      gamePresenceRulesStorageKey,
+      JSON.stringify(gamePresenceRules)
+    );
+  }, [gamePresenceRules, gamePresenceRulesStorageKey, user?.id]);
+
   const setRoomNotificationMode = useCallback(
     (roomId: string, mode: NotificationMode) => {
       setNotificationModesByRoom((prev) => ({ ...prev, [roomId]: mode }));
+      if (isConnected) {
+        socket.emit(
+          "notifications:set",
+          { roomId, mode },
+          (ack?: { ok: boolean; error?: string }) => {
+            if (!ack?.ok) {
+              console.warn(
+                "Failed to save notification mode:",
+                ack?.error || "unknown error"
+              );
+            }
+          }
+        );
+      }
     },
-    []
+    [isConnected, socket]
   );
+
+  useEffect(() => {
+    if (!isConnected || !user?.id) return;
+    socket.emit(
+      "notifications:get",
+      (ack?: {
+        ok: boolean;
+        modes?: Record<string, NotificationMode>;
+        error?: string;
+      }) => {
+        if (!ack?.ok || !ack.modes) return;
+        setNotificationModesByRoom(ack.modes);
+      }
+    );
+  }, [isConnected, socket, user?.id]);
 
   const handleSelectRoom = useCallback(
     (room: Room) => {
@@ -269,6 +502,61 @@ export default function Home() {
     },
     [voiceControls, connectedVoiceRoomId]
   );
+
+  useEffect(() => {
+    if (!activeRoom?.is_temporary) {
+      lastNonCallRoomRef.current = activeRoom;
+    }
+  }, [activeRoom]);
+
+  useEffect(() => {
+    if (!isConnected) return;
+
+    function onCallState(payload: {
+      room: Room;
+      ownerUserId: string;
+      participantIds: string[];
+    }) {
+      if (!payload?.room?.id) return;
+      setActiveCall({
+        room: payload.room,
+        ownerUserId: payload.ownerUserId,
+        participantIds: payload.participantIds || [],
+      });
+      if (payload.participantIds?.includes(user?.id || "")) {
+        setActiveRoom((prev) => {
+          if (prev?.id === payload.room.id) return prev;
+          if (prev && !prev.is_temporary) lastNonCallRoomRef.current = prev;
+          return payload.room;
+        });
+        setPendingAutoJoinVoiceRoomId(payload.room.id);
+      }
+    }
+
+    function onCallEnded(payload: { roomId: string }) {
+      if (!payload?.roomId) return;
+      setActiveCall((prev) => (prev?.room.id === payload.roomId ? null : prev));
+      setPendingAutoJoinVoiceRoomId((prev) => (prev === payload.roomId ? null : prev));
+      setConnectedVoiceRoomId((prev) => (prev === payload.roomId ? null : prev));
+      setActiveRoom((prev) => {
+        if (prev?.id !== payload.roomId) return prev;
+        return lastNonCallRoomRef.current;
+      });
+    }
+
+    function onCallRemoved(payload: { roomId: string }) {
+      onCallEnded(payload);
+    }
+
+    socket.on("call:state", onCallState);
+    socket.on("call:ended", onCallEnded);
+    socket.on("call:removed", onCallRemoved);
+    return () => {
+      socket.off("call:state", onCallState);
+      socket.off("call:ended", onCallEnded);
+      socket.off("call:removed", onCallRemoved);
+    };
+  }, [isConnected, socket, user?.id]);
 
   const handleVoiceControlsChange = useCallback(
     (roomId: string, controls: VoiceControls | null) => {
@@ -369,6 +657,143 @@ export default function Home() {
     notificationModesByRoom,
   ]);
 
+  useEffect(() => {
+    if (!isConnected || !user?.id) return;
+
+    let cancelled = false;
+    const emitIfChanged = async () => {
+      const detection = await detectGameDetails();
+      if (cancelled) return;
+      if (detection.kind === "known") {
+        const nextGame = detection.game.trim();
+        if (!nextGame) return;
+        if (nextGame === lastSentGameActivityRef.current) return;
+        lastSentGameActivityRef.current = nextGame;
+        socket.emit("user:activity", { game: nextGame });
+        setPendingUnknownGame(null);
+        return;
+      }
+
+      if (detection.kind === "unknown") {
+        const exe = detection.executable.toLowerCase();
+        const mappedName = gamePresenceRules.aliases[exe];
+        const ignored =
+          gamePresenceRules.ignoredExecutables.includes(exe) ||
+          dismissedUnknownGamesRef.current.has(exe);
+
+        if (mappedName && mappedName.trim()) {
+          const nextGame = mappedName.trim();
+          if (nextGame !== lastSentGameActivityRef.current) {
+            lastSentGameActivityRef.current = nextGame;
+            socket.emit("user:activity", { game: nextGame });
+          }
+          return;
+        }
+
+        if (!ignored) {
+          setPendingUnknownGame((prev) => {
+            if (prev?.executable === exe) return prev;
+            setUnknownGameLabelInput(detection.suggestedName || "Unknown Game");
+            return {
+              executable: exe,
+              suggestedName: detection.suggestedName || "Unknown Game",
+            };
+          });
+        }
+
+        if (lastSentGameActivityRef.current !== null) {
+          lastSentGameActivityRef.current = null;
+          socket.emit("user:activity", { game: null });
+        }
+        return;
+      }
+
+      if (lastSentGameActivityRef.current !== null) {
+        lastSentGameActivityRef.current = null;
+        socket.emit("user:activity", { game: null });
+      }
+    };
+
+    void emitIfChanged();
+    const timer = window.setInterval(() => {
+      void emitIfChanged();
+    }, 15000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      if (lastSentGameActivityRef.current !== null) {
+        socket.emit("user:activity", { game: null });
+        lastSentGameActivityRef.current = null;
+      }
+    };
+  }, [isConnected, socket, user?.id, gamePresenceRules]);
+
+  useEffect(() => {
+    // Clearing active server badge on switch keeps focus on inactive server notifications.
+    setServerUnreadByUrl((prev) => {
+      if (!prev[serverUrl]) return prev;
+      return { ...prev, [serverUrl]: 0 };
+    });
+  }, [serverUrl]);
+
+  useEffect(() => {
+    const sockets = backgroundSocketsRef.current;
+    const desired = new Set<string>();
+
+    for (const server of servers) {
+      const url = (server.url || "").trim().replace(/\/+$/, "");
+      if (!url || url === serverUrl) continue;
+      const tokenForServer = getServerToken(url);
+      if (!tokenForServer) continue;
+      desired.add(url);
+
+      let bgSocket = sockets.get(url);
+      if (!bgSocket) {
+        bgSocket = io(url, {
+          autoConnect: false,
+          transports: ["websocket", "polling"],
+          auth: { token: tokenForServer },
+        });
+        bgSocket.on("message:notify", (payload: { user_id?: string }) => {
+          if (payload?.user_id === selfUserIdRef.current) return;
+          setServerUnreadByUrl((prev) => ({
+            ...prev,
+            [url]: (prev[url] ?? 0) + 1,
+          }));
+        });
+        sockets.set(url, bgSocket);
+      }
+
+      bgSocket.auth = { token: tokenForServer };
+      if (!bgSocket.connected) {
+        bgSocket.connect();
+      }
+    }
+
+    for (const [url, bgSocket] of sockets.entries()) {
+      if (!desired.has(url)) {
+        bgSocket.removeAllListeners();
+        bgSocket.disconnect();
+        sockets.delete(url);
+      }
+    }
+
+    return () => {
+      // Keep long-lived background sockets while this screen is mounted.
+    };
+  }, [servers, serverUrl, getServerToken]);
+
+  useEffect(() => {
+    return () => {
+      for (const socketEntry of backgroundSocketsRef.current.values()) {
+        socketEntry.removeAllListeners();
+        socketEntry.disconnect();
+      }
+      backgroundSocketsRef.current.clear();
+    };
+  }, []);
+
   const activeVoiceRoom =
     activeRoom && activeRoom.type === "voice" ? activeRoom : null;
   const connectedVoiceRoom = useMemo(() => {
@@ -389,6 +814,50 @@ export default function Home() {
     return Array.from(set);
   }, [serverUsers, profile.username, dmRooms]);
 
+  function handleSaveUnknownGame() {
+    if (!pendingUnknownGame) return;
+    const label = unknownGameLabelInput.trim();
+    if (!label) return;
+    const exe = pendingUnknownGame.executable.toLowerCase();
+    setGamePresenceRules((prev) => {
+      const nextIgnored = prev.ignoredExecutables.filter((entry) => entry !== exe);
+      return {
+        aliases: { ...prev.aliases, [exe]: label },
+        ignoredExecutables: nextIgnored,
+      };
+    });
+    dismissedUnknownGamesRef.current.delete(exe);
+    setPendingUnknownGame(null);
+    setUnknownGameLabelInput("");
+    if (label !== lastSentGameActivityRef.current) {
+      lastSentGameActivityRef.current = label;
+      socket.emit("user:activity", { game: label });
+    }
+  }
+
+  function handleIgnoreUnknownGame() {
+    if (!pendingUnknownGame) return;
+    const exe = pendingUnknownGame.executable.toLowerCase();
+    setGamePresenceRules((prev) => ({
+      aliases: prev.aliases,
+      ignoredExecutables: prev.ignoredExecutables.includes(exe)
+        ? prev.ignoredExecutables
+        : [...prev.ignoredExecutables, exe],
+    }));
+    setPendingUnknownGame(null);
+    setUnknownGameLabelInput("");
+    if (lastSentGameActivityRef.current !== null) {
+      lastSentGameActivityRef.current = null;
+      socket.emit("user:activity", { game: null });
+    }
+  }
+
+  function handleDismissUnknownGame() {
+    if (!pendingUnknownGame) return;
+    dismissedUnknownGamesRef.current.add(pendingUnknownGame.executable.toLowerCase());
+    setPendingUnknownGame(null);
+  }
+
   if (loading || !token) {
     return (
       <div className="flex items-center justify-center flex-1 bg-[var(--bg-primary)]">
@@ -404,10 +873,15 @@ export default function Home() {
       <div className="relative z-10 flex w-full h-full p-4 gap-5">
         <Sidebar
           rooms={rooms}
+          categories={categories}
           dmRooms={dmRooms}
           activeRoom={activeRoom}
           onSelectRoom={handleSelectRoom}
           onCreateRoom={handleCreateRoom}
+          onCreateCategory={handleCreateCategory}
+          onRenameRoom={handleRenameRoom}
+          onRenameCategory={handleRenameCategory}
+          onUpdateLayout={handleLayoutUpdate}
           username={profile.username}
           status={profile.status}
           avatarUrl={profile.avatarUrl}
@@ -417,6 +891,19 @@ export default function Home() {
           voiceControls={voiceControls}
           unreadByRoom={unreadByRoom}
           mentionByRoom={mentionByRoom}
+          serverName={serverInfo?.name || "Server"}
+          serverProfiles={servers}
+          activeServerUrl={serverUrl}
+          onSwitchServer={switchServer}
+          onManageServers={() => navigate("/login?manageServers=1")}
+          serverUnreadByUrl={serverUnreadByUrl}
+          isServerConnected={isConnected}
+          isServerReconnecting={isReconnecting}
+          serverMaintenanceMode={Boolean(serverInfo?.maintenanceMode)}
+          canCreateRooms={Boolean(
+            user?.isAdmin || serverInfo?.userCanCreateRooms !== false
+          )}
+          canManageChannels={Boolean(user?.isAdmin)}
         />
 
         {/* Main content area */}
@@ -488,6 +975,20 @@ export default function Home() {
             currentUserId={user?.id ?? null}
             onUserClick={handleOpenDM}
             onViewProfile={setViewedProfile}
+            activeCall={
+              activeCall
+                ? {
+                    roomId: activeCall.room.id,
+                    ownerUserId: activeCall.ownerUserId,
+                    participantIds: activeCall.participantIds,
+                  }
+                : null
+            }
+            onStartCall={handleStartCall}
+            onAddToCall={handleAddToCall}
+            onRemoveFromCall={handleRemoveFromCall}
+            onEndCall={handleEndCall}
+            onLeaveCall={handleLeaveCall}
             onToggle={toggleMemberList}
           />
         ) : (
@@ -531,6 +1032,57 @@ export default function Home() {
                 }
           }
         />
+      )}
+      {pendingUnknownGame && (
+        <div
+          className="create-modal-backdrop"
+          onClick={handleDismissUnknownGame}
+        >
+          <div className="create-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="create-modal-title">Unknown Game Detected</div>
+            <p className="create-modal-subtitle">
+              We found an unrecognized game process. Set how it should appear in your status.
+            </p>
+            <div className="game-presence-exe">
+              Executable: <code>{pendingUnknownGame.executable}</code>
+            </div>
+            <label className="create-modal-field-label" htmlFor="unknown-game-label">
+              Display Name
+            </label>
+            <input
+              id="unknown-game-label"
+              type="text"
+              value={unknownGameLabelInput}
+              onChange={(event) => setUnknownGameLabelInput(event.target.value)}
+              placeholder={pendingUnknownGame.suggestedName || "Game name"}
+              className="w-full px-3 py-3 mb-4 text-sm bg-[var(--bg-input)] text-[var(--text-primary)] border border-[var(--border)] rounded-lg outline-none focus:border-[var(--accent)]"
+            />
+            <div className="create-modal-actions">
+              <button
+                type="button"
+                className="profile-button secondary"
+                onClick={handleIgnoreUnknownGame}
+              >
+                Not a game
+              </button>
+              <button
+                type="button"
+                className="profile-button secondary"
+                onClick={handleDismissUnknownGame}
+              >
+                Later
+              </button>
+              <button
+                type="button"
+                className="profile-button"
+                onClick={handleSaveUnknownGame}
+                disabled={!unknownGameLabelInput.trim()}
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

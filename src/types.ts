@@ -11,6 +11,7 @@ export interface ServerUser {
   avatar_url: string | null;
   status: "online" | "offline" | "away" | "dnd";
   about: string | null;
+  activity_game?: string | null;
 }
 
 export interface Room {
@@ -19,11 +20,23 @@ export interface Room {
   type: "text" | "voice" | "dm";
   created_by: string;
   created_at: string;
+  category_id?: string | null;
+  position?: number;
+  is_temporary?: number;
+  owner_user_id?: string | null;
   // DM-specific fields (present when type === 'dm')
   other_user_id?: string;
   other_username?: string;
   other_avatar_url?: string | null;
   other_status?: string;
+}
+
+export interface RoomCategory {
+  id: string;
+  name: string;
+  position: number;
+  enforce_type_order: number;
+  created_at: string;
 }
 
 export interface VoiceControls {
@@ -70,7 +83,14 @@ export interface Message {
   error?: string;
   content: string;
   attachments?: MessageAttachment[];
+  reactions?: MessageReaction[];
   created_at: string;
+}
+
+export interface MessageReaction {
+  emoji: string;
+  count: number;
+  user_ids: string[];
 }
 
 export interface MessageAttachment {

@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useLayoutEffect } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import type { Room, VoiceControls } from "../../types";
+import type { Room, RoomCategory, VoiceControls } from "../../types";
 import {
   Mic,
   MicOff,
@@ -21,10 +21,18 @@ import { getServerUrl } from "../../lib/api";
 
 interface SidebarProps {
   rooms: Room[];
+  categories: RoomCategory[];
   dmRooms: Room[];
   activeRoom: Room | null;
   onSelectRoom: (room: Room) => void;
-  onCreateRoom: (name: string, type: "text" | "voice") => void;
+  onCreateRoom: (name: string, type: "text" | "voice", categoryId?: string) => void;
+  onCreateCategory: (name: string) => void;
+  onRenameRoom: (roomId: string, name: string) => void;
+  onRenameCategory: (categoryId: string, name: string) => void;
+  onUpdateLayout: (payload: {
+    categories: Array<{ id: string; position: number; enforceTypeOrder: boolean }>;
+    rooms: Array<{ id: string; categoryId: string; position: number }>;
+  }) => void;
   username: string;
   status: "online" | "offline" | "away" | "dnd";
   avatarUrl: string;
@@ -37,14 +45,30 @@ interface SidebarProps {
   voiceControls: VoiceControls | null;
   unreadByRoom: Record<string, number>;
   mentionByRoom: Record<string, number>;
+  serverName: string;
+  serverProfiles: Array<{ url: string; name: string }>;
+  activeServerUrl: string;
+  onSwitchServer: (url: string) => void;
+  onManageServers: () => void;
+  serverUnreadByUrl: Record<string, number>;
+  isServerConnected: boolean;
+  isServerReconnecting: boolean;
+  serverMaintenanceMode: boolean;
+  canCreateRooms: boolean;
+  canManageChannels: boolean;
 }
 
 export default function Sidebar({
   rooms,
+  categories,
   dmRooms,
   activeRoom,
   onSelectRoom,
   onCreateRoom,
+  onCreateCategory,
+  onRenameRoom,
+  onRenameCategory,
+  onUpdateLayout,
   username,
   status,
   avatarUrl,
@@ -54,13 +78,42 @@ export default function Sidebar({
   voiceControls,
   unreadByRoom,
   mentionByRoom,
+  serverName,
+  serverProfiles,
+  activeServerUrl,
+  onSwitchServer,
+  onManageServers,
+  serverUnreadByUrl,
+  isServerConnected,
+  isServerReconnecting,
+  serverMaintenanceMode,
+  canCreateRooms,
+  canManageChannels,
 }: SidebarProps) {
+  type SidebarContextMenu = {
+    x: number;
+    y: number;
+    scope: "sidebar" | "category" | "room";
+    categoryId?: string;
+    renameKind?: "room" | "category";
+    renameId?: string;
+    renameName?: string;
+  };
+
   const [newRoomName, setNewRoomName] = useState("");
   const [showCreate, setShowCreate] = useState(false);
+  const [createEntity, setCreateEntity] = useState<"channel" | "category">("channel");
   const [createType, setCreateType] = useState<"text" | "voice">("text");
+  const [createCategoryId, setCreateCategoryId] = useState("default");
+  const [showRename, setShowRename] = useState(false);
+  const [renameValue, setRenameValue] = useState("");
+  const [renameTarget, setRenameTarget] = useState<{
+    kind: "room" | "category";
+    id: string;
+  } | null>(null);
+  const [contextMenu, setContextMenu] = useState<SidebarContextMenu | null>(null);
   const [showSharePicker, setShowSharePicker] = useState(false);
-  const [textCollapsed, setTextCollapsed] = useState(false);
-  const [voiceCollapsed, setVoiceCollapsed] = useState(false);
+  const [collapsedCategories, setCollapsedCategories] = useState<Record<string, boolean>>({});
   const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([]);
   const [audioOutputs, setAudioOutputs] = useState<MediaDeviceInfo[]>([]);
   const [devicePickerError, setDevicePickerError] = useState<string | null>(null);
@@ -75,9 +128,13 @@ export default function Sidebar({
     bottom: 0,
     left: 0,
   });
+  const [draggedRoomId, setDraggedRoomId] = useState<string | null>(null);
+  const contextMenuRef = useRef<HTMLDivElement | null>(null);
+  const serverMenuRef = useRef<HTMLDivElement | null>(null);
+  const [serverMenuOpen, setServerMenuOpen] = useState(false);
+  const CONTEXT_MENU_MARGIN = 8;
 
-  const textRooms = rooms.filter((r) => r.type === "text");
-  const voiceRooms = rooms.filter((r) => r.type === "voice");
+  const channelRooms = rooms.filter((r) => r.type === "text" || r.type === "voice");
 
   // Track departing voice participants so we can animate them out
   type VPart = { id: string; name: string; isSpeaking: boolean };
@@ -137,6 +194,66 @@ export default function Sidebar({
     document.addEventListener("mousedown", handleClick);
     return () => document.removeEventListener("mousedown", handleClick);
   }, [showSharePicker]);
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    function handleClick(event: MouseEvent) {
+      if (
+        contextMenuRef.current &&
+        !contextMenuRef.current.contains(event.target as Node)
+      ) {
+        setContextMenu(null);
+      }
+    }
+    function onEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setContextMenu(null);
+    }
+    window.addEventListener("mousedown", handleClick);
+    window.addEventListener("keydown", onEscape);
+    return () => {
+      window.removeEventListener("mousedown", handleClick);
+      window.removeEventListener("keydown", onEscape);
+    };
+  }, [contextMenu]);
+
+  useEffect(() => {
+    if (!serverMenuOpen) return;
+    function onClick(event: MouseEvent) {
+      if (
+        serverMenuRef.current &&
+        !serverMenuRef.current.contains(event.target as Node)
+      ) {
+        setServerMenuOpen(false);
+      }
+    }
+    function onEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setServerMenuOpen(false);
+    }
+    window.addEventListener("mousedown", onClick);
+    window.addEventListener("keydown", onEscape);
+    return () => {
+      window.removeEventListener("mousedown", onClick);
+      window.removeEventListener("keydown", onEscape);
+    };
+  }, [serverMenuOpen]);
+
+  useLayoutEffect(() => {
+    if (!contextMenu || !contextMenuRef.current) return;
+    const rect = contextMenuRef.current.getBoundingClientRect();
+    const maxX = window.innerWidth - CONTEXT_MENU_MARGIN;
+    const maxY = window.innerHeight - CONTEXT_MENU_MARGIN;
+    let nextX = contextMenu.x;
+    let nextY = contextMenu.y;
+    if (rect.right > maxX) nextX -= rect.right - maxX;
+    if (rect.bottom > maxY) nextY -= rect.bottom - maxY;
+    if (rect.left < CONTEXT_MENU_MARGIN) nextX += CONTEXT_MENU_MARGIN - rect.left;
+    if (rect.top < CONTEXT_MENU_MARGIN) nextY += CONTEXT_MENU_MARGIN - rect.top;
+    if (nextX !== contextMenu.x || nextY !== contextMenu.y) {
+      setContextMenu((prev) =>
+        prev ? { ...prev, x: nextX, y: nextY } : prev
+      );
+    }
+  }, [contextMenu]);
 
   // Close picker if sharing starts or voice disconnects
   useEffect(() => {
@@ -215,6 +332,118 @@ export default function Sidebar({
   };
 
   const currentStatus = statusMap[status] || statusMap.online;
+  const serverStatusLabel = serverMaintenanceMode
+    ? "Maintenance mode"
+    : isServerConnected
+      ? "Connected"
+      : isServerReconnecting
+        ? "Reconnecting..."
+        : "Disconnected";
+  const serverStatusClass = serverMaintenanceMode
+    ? "warn"
+    : isServerConnected
+      ? "online"
+      : "offline";
+
+  const orderedCategories = (() => {
+    if (categories.length > 0) {
+      return [...categories].sort((a, b) => a.position - b.position);
+    }
+    return [
+      {
+        id: "default",
+        name: "Channels",
+        position: 0,
+        enforce_type_order: 1,
+        created_at: new Date(0).toISOString(),
+      },
+    ] as RoomCategory[];
+  })();
+
+  useEffect(() => {
+    if (!showCreate || createEntity !== "channel") return;
+    if (orderedCategories.some((category) => category.id === createCategoryId)) return;
+    setCreateCategoryId(orderedCategories[0]?.id || "default");
+  }, [showCreate, createEntity, createCategoryId, orderedCategories]);
+
+  function sortRoomsForCategory(cat: RoomCategory, categoryRooms: Room[]) {
+    const enforce = cat.enforce_type_order === 1;
+    return [...categoryRooms].sort((a, b) => {
+      if (enforce) {
+        const aRank = a.type === "text" ? 0 : 1;
+        const bRank = b.type === "text" ? 0 : 1;
+        if (aRank !== bRank) return aRank - bRank;
+      }
+      return (a.position ?? 0) - (b.position ?? 0);
+    });
+  }
+
+  function getCategoryRooms(categoryId: string, allRooms: Room[] = channelRooms) {
+    return allRooms.filter((room) => (room.category_id || "default") === categoryId);
+  }
+
+  function updateLayoutAfterMove(
+    movingRoomId: string,
+    targetCategoryId: string,
+    targetIndex: number
+  ) {
+    const movingRoom = channelRooms.find((room) => room.id === movingRoomId);
+    if (!movingRoom) return;
+
+    const nextCategories = orderedCategories.map((cat) => ({ ...cat }));
+    const roomByCategory = new Map<string, Room[]>();
+
+    for (const category of orderedCategories) {
+      roomByCategory.set(
+        category.id,
+        sortRoomsForCategory(category, getCategoryRooms(category.id))
+      );
+    }
+
+    for (const [categoryId, list] of roomByCategory.entries()) {
+      const idx = list.findIndex((room) => room.id === movingRoomId);
+      if (idx !== -1) {
+        list.splice(idx, 1);
+        roomByCategory.set(categoryId, list);
+      }
+    }
+
+    const targetList = roomByCategory.get(targetCategoryId) || [];
+    const safeIndex = Math.max(0, Math.min(targetIndex, targetList.length));
+    targetList.splice(safeIndex, 0, { ...movingRoom, category_id: targetCategoryId });
+    roomByCategory.set(targetCategoryId, targetList);
+
+    const targetCategory = nextCategories.find((cat) => cat.id === targetCategoryId);
+    if (targetCategory && targetCategory.enforce_type_order === 1) {
+      let seenVoice = false;
+      let violatesDefaultOrder = false;
+      for (const room of targetList) {
+        if (room.type === "voice") seenVoice = true;
+        if (room.type === "text" && seenVoice) {
+          violatesDefaultOrder = true;
+          break;
+        }
+      }
+      if (violatesDefaultOrder) {
+        targetCategory.enforce_type_order = 0;
+      }
+    }
+
+    onUpdateLayout({
+      categories: nextCategories.map((cat, index) => ({
+        id: cat.id,
+        position: index,
+        enforceTypeOrder: cat.enforce_type_order === 1,
+      })),
+      rooms: nextCategories.flatMap((cat) =>
+        (roomByCategory.get(cat.id) || []).map((room, index) => ({
+          id: room.id,
+          categoryId: cat.id,
+          position: index,
+        }))
+      ),
+    });
+  }
 
   // Fetch fresh media limits from server and position the popover
   const openSharePicker = useCallback(async () => {
@@ -249,21 +478,92 @@ export default function Sidebar({
   // Use freshly-fetched limits when available, otherwise fall back to token-time limits
   const activeLimits = pickerLimits || voiceControls?.mediaLimits;
 
-  function openCreateModal() {
-    setCreateType("text");
+  function getSafeCreateCategoryId(requested?: string) {
+    const fallback = orderedCategories[0]?.id || "default";
+    if (!requested) return fallback;
+    return orderedCategories.some((category) => category.id === requested)
+      ? requested
+      : fallback;
+  }
+
+  function openCreateModal(options?: {
+    entity?: "channel" | "category";
+    type?: "text" | "voice";
+    categoryId?: string;
+  }) {
+    setCreateEntity(options?.entity || "channel");
+    setCreateType(options?.type || "text");
+    setCreateCategoryId(getSafeCreateCategoryId(options?.categoryId));
+    setContextMenu(null);
     setShowCreate(true);
   }
 
   function closeCreateModal() {
     setShowCreate(false);
     setNewRoomName("");
+    setCreateEntity("channel");
+    setCreateType("text");
+    setCreateCategoryId(getSafeCreateCategoryId());
   }
 
   function handleCreate() {
-    if (newRoomName.trim()) {
-      onCreateRoom(newRoomName.trim(), createType);
+    const trimmed = newRoomName.trim();
+    if (!trimmed) return;
+    if (createEntity === "category") {
+      if (!canManageChannels) return;
+      onCreateCategory(trimmed);
       closeCreateModal();
+      return;
     }
+    onCreateRoom(trimmed, createType, createCategoryId);
+    closeCreateModal();
+  }
+
+  function openRenameFromContextMenu() {
+    if (
+      !contextMenu ||
+      !contextMenu.renameKind ||
+      !contextMenu.renameId ||
+      !contextMenu.renameName
+    ) {
+      return;
+    }
+    setRenameTarget({ kind: contextMenu.renameKind, id: contextMenu.renameId });
+    setRenameValue(contextMenu.renameName);
+    setShowRename(true);
+    setContextMenu(null);
+  }
+
+  function openCreateFromContextMenu(type: "text" | "voice") {
+    if (!contextMenu || !canCreateRooms) return;
+    const categoryFromRoom =
+      contextMenu.scope === "room"
+        ? channelRooms.find((room) => room.id === contextMenu.renameId)?.category_id || "default"
+        : undefined;
+    const preferredCategory =
+      contextMenu.categoryId || categoryFromRoom || orderedCategories[0]?.id || "default";
+    openCreateModal({
+      entity: "channel",
+      type,
+      categoryId: preferredCategory,
+    });
+  }
+
+  function closeRenameModal() {
+    setShowRename(false);
+    setRenameValue("");
+    setRenameTarget(null);
+  }
+
+  function submitRename() {
+    const trimmed = renameValue.trim();
+    if (!renameTarget || !trimmed) return;
+    if (renameTarget.kind === "room") {
+      onRenameRoom(renameTarget.id, trimmed);
+    } else {
+      onRenameCategory(renameTarget.id, trimmed);
+    }
+    closeRenameModal();
   }
 
   function formatBadgeCount(count: number) {
@@ -296,35 +596,114 @@ export default function Sidebar({
     return device.label || `${prefix} ${index + 1}`;
   }
 
+  function formatServerOption(url: string, name: string) {
+    if (!url) return name || "Server";
+    try {
+      const parsed = new URL(url);
+      const host = parsed.host;
+      if (!name || name === host) return host;
+      return `${name} (${host})`;
+    } catch {
+      return name ? `${name} (${url})` : url;
+    }
+  }
+
+  function formatServerBadgeCount(count: number) {
+    if (count > 99) return "99+";
+    return String(count);
+  }
+
   return (
     <>
       <aside className="flex flex-col w-72 h-full sidebar-panel">
         {/* Server header */}
         <div className="sidebar-header">
           <div className="sidebar-header-row">
-            <div className="sidebar-header-brand">
-              <div className="sidebar-header-logo">
-                <span className="heading-font">CC</span>
-              </div>
-              <div>
-                <h1 className="sidebar-header-title heading-font">ChitChat</h1>
-                <div className="sidebar-header-subtitle">
-                  <span className="sidebar-header-dot" />
-                  <p className="sidebar-header-label">Self-hosted</p>
-                </div>
+            <div className="sidebar-server-meta">
+              <h1 className="sidebar-header-title heading-font">
+                {serverName || "Server"}
+              </h1>
+              <div className="sidebar-header-subtitle">
+                <span className={`sidebar-header-dot ${serverStatusClass}`} />
+                <p className="sidebar-header-label">{serverStatusLabel}</p>
               </div>
             </div>
+            {canCreateRooms && (
+              <button
+                onClick={() =>
+                  openCreateModal({
+                    entity: "channel",
+                    type: "text",
+                    categoryId:
+                      activeRoom?.type === "text" || activeRoom?.type === "voice"
+                        ? activeRoom.category_id || "default"
+                        : orderedCategories[0]?.id || "default",
+                  })
+                }
+                className="sidebar-create-btn"
+                title="Create"
+              >
+                +
+              </button>
+            )}
+          </div>
+          <div className="sidebar-server-switch" ref={serverMenuRef}>
             <button
-              onClick={openCreateModal}
-              className="sidebar-create-btn"
-              title="Create channel"
+              type="button"
+              className="sidebar-server-select"
+              onClick={() => setServerMenuOpen((prev) => !prev)}
+              title="Switch server"
             >
-              +
+              <span className="sidebar-server-select-label">
+                {formatServerOption(
+                  activeServerUrl,
+                  serverProfiles.find((server) => server.url === activeServerUrl)?.name ||
+                    serverName
+                )}
+              </span>
+              <ChevronDown size={14} />
             </button>
+            <button
+              type="button"
+              className="sidebar-server-manage"
+              onClick={onManageServers}
+              title="Manage servers"
+            >
+              Manage
+            </button>
+            {serverMenuOpen && (
+              <div className="sidebar-server-menu">
+                {serverProfiles.map((server) => {
+                  const unread = serverUnreadByUrl[server.url] ?? 0;
+                  return (
+                    <button
+                      key={server.url}
+                      type="button"
+                      className={`sidebar-server-menu-item ${
+                        server.url === activeServerUrl ? "active" : ""
+                      }`}
+                      onClick={() => {
+                        onSwitchServer(server.url);
+                        setServerMenuOpen(false);
+                      }}
+                    >
+                      <span className="sidebar-server-menu-text">
+                        {formatServerOption(server.url, server.name)}
+                      </span>
+                      {unread > 0 && (
+                        <span className="sidebar-server-menu-badge">
+                          {formatServerBadgeCount(unread)}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
         </div>
 
-      {/* Create channel modal */}
+      {/* Create modal */}
       {showCreate && (
         <div
           className="create-modal-backdrop"
@@ -334,35 +713,76 @@ export default function Sidebar({
             className="create-modal"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="create-modal-title">Create Channel</div>
+            <div className="create-modal-title">Create</div>
             <p className="create-modal-subtitle">
-              Give your new channel a name and choose its type.
+              Create a channel or category.
             </p>
-            <div className="create-toggle" role="group" aria-label="Channel type">
+            <div className="create-toggle" role="group" aria-label="Create type">
               <button
                 type="button"
                 className={`create-toggle-option ${
-                  createType === "text" ? "active" : ""
+                  createEntity === "channel" ? "active" : ""
                 }`}
-                onClick={() => setCreateType("text")}
+                onClick={() => setCreateEntity("channel")}
               >
-                Text
+                Channel
               </button>
-              <button
-                type="button"
-                className={`create-toggle-option ${
-                  createType === "voice" ? "active" : ""
-                }`}
-                onClick={() => setCreateType("voice")}
-              >
-                Voice
-              </button>
+              {canManageChannels && (
+                <button
+                  type="button"
+                  className={`create-toggle-option ${
+                    createEntity === "category" ? "active" : ""
+                  }`}
+                  onClick={() => setCreateEntity("category")}
+                >
+                  Category
+                </button>
+              )}
             </div>
+            {createEntity === "channel" && (
+              <div className="create-channel-options">
+                <div className="create-toggle" role="group" aria-label="Channel type">
+                  <button
+                    type="button"
+                    className={`create-toggle-option ${
+                      createType === "text" ? "active" : ""
+                    }`}
+                    onClick={() => setCreateType("text")}
+                  >
+                    Text
+                  </button>
+                  <button
+                    type="button"
+                    className={`create-toggle-option ${
+                      createType === "voice" ? "active" : ""
+                    }`}
+                    onClick={() => setCreateType("voice")}
+                  >
+                    Voice
+                  </button>
+                </div>
+                <label className="create-modal-field-label" htmlFor="create-channel-category">
+                  Category
+                </label>
+                <select
+                  id="create-channel-category"
+                  value={createCategoryId}
+                  onChange={(event) => setCreateCategoryId(event.target.value)}
+                  className="create-modal-select"
+                >
+                  {orderedCategories.map((category) => (
+                    <option key={category.id} value={category.id}>
+                      {category.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
             <input
               type="text"
               value={newRoomName}
               onChange={(e) => setNewRoomName(e.target.value)}
-              placeholder="channel-name"
+              placeholder={createEntity === "category" ? "category-name" : "channel-name"}
               className="w-full px-3 py-3 mb-4 text-sm bg-[var(--bg-input)] text-[var(--text-primary)] border border-[var(--border)] rounded-lg outline-none focus:border-[var(--accent)]"
             />
             <div className="create-modal-actions">
@@ -378,7 +798,91 @@ export default function Sidebar({
                 onClick={handleCreate}
                 className="profile-button"
               >
-                Create channel
+                {createEntity === "category" ? "Create category" : "Create channel"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {contextMenu && (canCreateRooms || canManageChannels) && (
+        <div
+          ref={contextMenuRef}
+          className="sidebar-context-menu"
+          style={{ top: contextMenu.y, left: contextMenu.x }}
+        >
+          {canCreateRooms && (
+            <>
+              <button
+                type="button"
+                className="sidebar-context-menu-item"
+                onClick={() => openCreateFromContextMenu("text")}
+              >
+                Create text channel
+              </button>
+              <button
+                type="button"
+                className="sidebar-context-menu-item"
+                onClick={() => openCreateFromContextMenu("voice")}
+              >
+                Create voice channel
+              </button>
+            </>
+          )}
+          {canManageChannels &&
+            (contextMenu.scope === "sidebar" || contextMenu.scope === "category") && (
+              <button
+                type="button"
+                className="sidebar-context-menu-item"
+                onClick={() => openCreateModal({ entity: "category" })}
+              >
+                Create category
+              </button>
+            )}
+          {canManageChannels &&
+            (contextMenu.renameKind === "category" || contextMenu.renameKind === "room") && (
+              <button
+                type="button"
+                className="sidebar-context-menu-item"
+                onClick={openRenameFromContextMenu}
+              >
+                {contextMenu.renameKind === "category"
+                  ? "Rename category"
+                  : "Rename channel"}
+              </button>
+            )}
+        </div>
+      )}
+
+      {showRename && renameTarget && (
+        <div className="create-modal-backdrop" onClick={closeRenameModal}>
+          <div className="create-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="create-modal-title">
+              {renameTarget.kind === "category" ? "Rename Category" : "Rename Channel"}
+            </div>
+            <p className="create-modal-subtitle">
+              Enter a new name.
+            </p>
+            <input
+              type="text"
+              value={renameValue}
+              onChange={(e) => setRenameValue(e.target.value)}
+              className="w-full px-3 py-3 mb-4 text-sm bg-[var(--bg-input)] text-[var(--text-primary)] border border-[var(--border)] rounded-lg outline-none focus:border-[var(--accent)]"
+            />
+            <div className="create-modal-actions">
+              <button
+                type="button"
+                onClick={closeRenameModal}
+                className="profile-button secondary"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={submitRename}
+                className="profile-button"
+              >
+                Save
               </button>
             </div>
           </div>
@@ -386,7 +890,191 @@ export default function Sidebar({
       )}
 
       {/* Room lists */}
-      <div className="sidebar-rooms">
+      <div
+        className="sidebar-rooms"
+        onContextMenu={(event) => {
+          if (!canCreateRooms && !canManageChannels) return;
+          event.preventDefault();
+          setContextMenu({
+            x: event.clientX,
+            y: event.clientY,
+            scope: "sidebar",
+            categoryId: orderedCategories[0]?.id || "default",
+          });
+        }}
+      >
+        {orderedCategories.map((category) => {
+          const categoryRooms = sortRoomsForCategory(
+            category,
+            getCategoryRooms(category.id)
+          );
+          const isCollapsed = collapsedCategories[category.id] ?? false;
+          return (
+            <div key={category.id}>
+              <button
+                className="sidebar-section-title heading-font sidebar-section-toggle"
+                onContextMenu={(event) => {
+                  if (!canCreateRooms && !canManageChannels) return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setContextMenu({
+                    x: event.clientX,
+                    y: event.clientY,
+                    scope: "category",
+                    categoryId: category.id,
+                    renameKind: "category",
+                    renameId: category.id,
+                    renameName: category.name,
+                  });
+                }}
+                onClick={() =>
+                  setCollapsedCategories((prev) => ({
+                    ...prev,
+                    [category.id]: !isCollapsed,
+                  }))
+                }
+              >
+                <span className="sidebar-section-toggle-label">
+                  {category.name} - {categoryRooms.length}
+                </span>
+                <span className="sidebar-section-toggle-icon" aria-hidden="true">
+                  {isCollapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+                </span>
+              </button>
+              <AnimatePresence initial={false}>
+                {!isCollapsed && (
+                  <motion.div
+                    key={`cat-${category.id}`}
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: "auto", opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    transition={{ duration: 0.2, ease: "easeOut" }}
+                    style={{ overflow: "hidden" }}
+                    onContextMenu={(event) => {
+                      if (!canCreateRooms && !canManageChannels) return;
+                      event.preventDefault();
+                      event.stopPropagation();
+                      setContextMenu({
+                        x: event.clientX,
+                        y: event.clientY,
+                        scope: "category",
+                        categoryId: category.id,
+                      });
+                    }}
+                    onDragOver={(event) => {
+                      if (!canManageChannels) return;
+                      event.preventDefault();
+                    }}
+                    onDrop={(event) => {
+                      if (!canManageChannels) return;
+                      event.preventDefault();
+                      if (!draggedRoomId) return;
+                      updateLayoutAfterMove(draggedRoomId, category.id, categoryRooms.length);
+                      setDraggedRoomId(null);
+                    }}
+                  >
+                    {categoryRooms.map((room) => (
+                      <motion.div
+                        key={room.id}
+                        initial={{ opacity: 0, y: -4 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -4 }}
+                        transition={{ duration: 0.16, ease: "easeOut" }}
+                      >
+                        <button
+                          onClick={() => onSelectRoom(room)}
+                          onContextMenu={(event) => {
+                            if (!canCreateRooms && !canManageChannels) return;
+                            event.preventDefault();
+                            event.stopPropagation();
+                            setContextMenu({
+                              x: event.clientX,
+                              y: event.clientY,
+                              scope: "room",
+                              categoryId: room.category_id || "default",
+                              renameKind: "room",
+                              renameId: room.id,
+                              renameName: room.name,
+                            });
+                          }}
+                          draggable={canManageChannels}
+                          onDragStart={() => setDraggedRoomId(room.id)}
+                          onDragEnd={() => setDraggedRoomId(null)}
+                          onDragOver={(event) => {
+                            if (!canManageChannels) return;
+                            event.preventDefault();
+                          }}
+                          onDrop={(event) => {
+                            if (!canManageChannels) return;
+                            event.preventDefault();
+                            if (!draggedRoomId || draggedRoomId === room.id) return;
+                            const targetIndex = categoryRooms.findIndex((r) => r.id === room.id);
+                            updateLayoutAfterMove(draggedRoomId, category.id, targetIndex);
+                            setDraggedRoomId(null);
+                          }}
+                          className={`sidebar-channel ${
+                            activeRoom?.id === room.id ? "active" : ""
+                          } ${draggedRoomId === room.id ? "dragging" : ""}`}
+                        >
+                          <span className="sidebar-channel-main">
+                            <span className="sidebar-channel-icon" aria-hidden="true">
+                              {room.type === "voice" ? (
+                                <Volume2 size={14} />
+                              ) : (
+                                <MessageSquare size={14} />
+                              )}
+                            </span>
+                            <span className="sidebar-channel-main-text">{room.name}</span>
+                            {room.type === "voice" && (
+                              <span className="sidebar-voice-count">
+                                {voiceParticipants[room.id]?.length ?? 0}
+                              </span>
+                            )}
+                          </span>
+                          {renderRoomBadges(room.id)}
+                        </button>
+                        {room.type === "voice" &&
+                        (voiceParticipants[room.id]?.length ||
+                          leavingParticipants[room.id]?.length) ? (
+                          <div className="sidebar-voice-participants">
+                            {voiceParticipants[room.id]?.map((participant) => (
+                              <div
+                                key={`${room.id}-${participant.id}`}
+                                className={`sidebar-voice-participant ${
+                                  participant.isSpeaking ? "speaking" : ""
+                                }`}
+                              >
+                                <span className="sidebar-voice-dot" />
+                                <span className="sidebar-voice-name">
+                                  {participant.name}
+                                </span>
+                                {participant.isSpeaking && (
+                                  <Mic size={12} className="sidebar-voice-speaking-icon" />
+                                )}
+                              </div>
+                            ))}
+                            {leavingParticipants[room.id]?.map((participant) => (
+                              <div
+                                key={`${room.id}-${participant.id}-leaving`}
+                                className="sidebar-voice-participant leaving"
+                              >
+                                <span className="sidebar-voice-dot" />
+                                <span className="sidebar-voice-name">
+                                  {participant.name}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
+                      </motion.div>
+                    ))}
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+          );
+        })}
+
         {/* Direct Messages */}
         {dmRooms.length > 0 && (
           <>
@@ -422,133 +1110,6 @@ export default function Sidebar({
             </AnimatePresence>
           </>
         )}
-
-        {/* Text channels */}
-        <button
-          className="sidebar-section-title heading-font sidebar-section-toggle"
-          onClick={() => setTextCollapsed((prev) => !prev)}
-        >
-          <span className="sidebar-section-toggle-label">Text Channels</span>
-          <span className="sidebar-section-toggle-icon" aria-hidden="true">
-            {textCollapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
-          </span>
-        </button>
-        <AnimatePresence initial={false}>
-          {!textCollapsed && (
-            <motion.div
-              key="text-rooms"
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: "auto", opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }}
-              transition={{ duration: 0.2, ease: "easeOut" }}
-              style={{ overflow: "hidden" }}
-            >
-              {textRooms.map((room) => (
-                <motion.button
-                  key={room.id}
-                  initial={{ opacity: 0, y: -4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -4 }}
-                  transition={{ duration: 0.16, ease: "easeOut" }}
-                  onClick={() => onSelectRoom(room)}
-                  className={`sidebar-channel ${
-                    activeRoom?.id === room.id ? "active" : ""
-                  }`}
-                >
-                  <span className="sidebar-channel-main">
-                    <span className="sidebar-channel-icon" aria-hidden="true">
-                      <MessageSquare size={14} />
-                    </span>
-                    <span className="sidebar-channel-main-text">{room.name}</span>
-                  </span>
-                  {renderRoomBadges(room.id)}
-                </motion.button>
-              ))}
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {/* Voice channels */}
-        <button
-          className="sidebar-section-title heading-font sidebar-section-toggle"
-          onClick={() => setVoiceCollapsed((prev) => !prev)}
-        >
-          <span className="sidebar-section-toggle-label">Voice Channels</span>
-          <span className="sidebar-section-toggle-icon" aria-hidden="true">
-            {voiceCollapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
-          </span>
-        </button>
-        <AnimatePresence initial={false}>
-          {!voiceCollapsed && (
-            <motion.div
-              key="voice-rooms"
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: "auto", opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }}
-              transition={{ duration: 0.2, ease: "easeOut" }}
-              style={{ overflow: "hidden" }}
-            >
-              {voiceRooms.map((room) => (
-                <motion.div
-                  key={room.id}
-                  initial={{ opacity: 0, y: -4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -4 }}
-                  transition={{ duration: 0.16, ease: "easeOut" }}
-                >
-                  <button
-                    onClick={() => onSelectRoom(room)}
-                    className={`sidebar-channel ${
-                      activeRoom?.id === room.id ? "active" : ""
-                    }`}
-                  >
-                    <span className="sidebar-channel-main">
-                      <span className="sidebar-channel-icon" aria-hidden="true">
-                        <Volume2 size={14} />
-                      </span>
-                      <span className="sidebar-channel-main-text">{room.name}</span>
-                      <span className="sidebar-voice-count">
-                        {voiceParticipants[room.id]?.length ?? 0}
-                      </span>
-                    </span>
-                    {renderRoomBadges(room.id)}
-                  </button>
-                  {(voiceParticipants[room.id]?.length || leavingParticipants[room.id]?.length) ? (
-                    <div className="sidebar-voice-participants">
-                      {voiceParticipants[room.id]?.map((participant) => (
-                        <div
-                          key={`${room.id}-${participant.id}`}
-                          className={`sidebar-voice-participant ${
-                            participant.isSpeaking ? "speaking" : ""
-                          }`}
-                        >
-                          <span className="sidebar-voice-dot" />
-                          <span className="sidebar-voice-name">
-                            {participant.name}
-                          </span>
-                          {participant.isSpeaking && (
-                            <Mic size={12} className="sidebar-voice-speaking-icon" />
-                          )}
-                        </div>
-                      ))}
-                      {leavingParticipants[room.id]?.map((participant) => (
-                        <div
-                          key={`${room.id}-${participant.id}-leaving`}
-                          className="sidebar-voice-participant leaving"
-                        >
-                          <span className="sidebar-voice-dot" />
-                          <span className="sidebar-voice-name">
-                            {participant.name}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  ) : null}
-                </motion.div>
-              ))}
-            </motion.div>
-          )}
-        </AnimatePresence>
       </div>
 
       {/* Voice controls (when connected) */}
