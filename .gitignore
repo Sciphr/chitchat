@@ -11,7 +11,6 @@ server/dist/
 # Environment files
 .env
 .env.local
-.env.example
 server/.env
 server/config.json
 
