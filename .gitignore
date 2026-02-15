@@ -13,6 +13,7 @@ server/dist/
 .env.local
 .env.example
 server/.env
+server/config.json
 
 # Tauri
 src-tauri/target/
@@ -29,3 +30,5 @@ src-tauri/target/
 # OS
 .DS_Store
 Thumbs.db
+
+config.json
