@@ -1,5 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAuth } from "../hooks/useAuth";
+import { createLocalVideoTrack, type LocalVideoTrack } from "livekit-client";
+import { BackgroundProcessor, supportsBackgroundProcessors } from "@livekit/track-processors";
+import { apiFetch } from "../lib/api";
 
 const THEMES = [
   { id: "midnight", label: "Midnight", accent: "#7c6aff", bg: "#0f0f17" },
@@ -52,10 +55,16 @@ export default function Settings({ onClose }: SettingsProps) {
     avatarUrl: profile.avatarUrl,
     about: profile.about,
     pushToTalkEnabled: profile.pushToTalkEnabled,
+    pushToMuteEnabled: profile.pushToMuteEnabled,
     pushToTalkKey: profile.pushToTalkKey,
+    audioInputSensitivity: profile.audioInputSensitivity,
+    noiseSuppressionMode: profile.noiseSuppressionMode,
     audioInputId: profile.audioInputId,
     audioOutputId: profile.audioOutputId,
     videoInputId: profile.videoInputId,
+    videoBackgroundMode: profile.videoBackgroundMode,
+    videoBackgroundImageUrl: profile.videoBackgroundImageUrl,
+    twoFactorEnabled: profile.twoFactorEnabled,
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -65,14 +74,42 @@ export default function Settings({ onClose }: SettingsProps) {
   const [activeTab, setActiveTab] = useState<"settings" | "public-profile">(
     "settings"
   );
+  const [activeSettingsSection, setActiveSettingsSection] = useState<
+    "identity" | "appearance" | "voice" | "security" | "about"
+  >("identity");
   const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([]);
   const [audioOutputs, setAudioOutputs] = useState<MediaDeviceInfo[]>([]);
   const [videoInputs, setVideoInputs] = useState<MediaDeviceInfo[]>([]);
   const [deviceError, setDeviceError] = useState<string | null>(null);
+  const [videoPreviewActive, setVideoPreviewActive] = useState(false);
+  const [videoPreviewError, setVideoPreviewError] = useState<string | null>(null);
+  const [twoFactorEnabled, setTwoFactorEnabled] = useState(profile.twoFactorEnabled);
+  const [twoFactorLoading, setTwoFactorLoading] = useState(false);
+  const [twoFactorError, setTwoFactorError] = useState("");
+  const [twoFactorMessage, setTwoFactorMessage] = useState("");
+  const [twoFactorSetup, setTwoFactorSetup] = useState<{
+    secret: string;
+    qrDataUrl: string;
+    expiresAt: string;
+  } | null>(null);
+  const [twoFactorCode, setTwoFactorCode] = useState("");
+  const [micTestActive, setMicTestActive] = useState(false);
+  const [micLevel, setMicLevel] = useState(0);
+  const micTestStreamRef = useRef<MediaStream | null>(null);
+  const micTestAudioCtxRef = useRef<AudioContext | null>(null);
+  const micTestAnalyserRef = useRef<AnalyserNode | null>(null);
+  const micTestRafRef = useRef<number | null>(null);
+  const videoPreviewElRef = useRef<HTMLVideoElement | null>(null);
+  const videoPreviewTrackRef = useRef<LocalVideoTrack | null>(null);
+  const videoPreviewProcessorRef = useRef<ReturnType<typeof BackgroundProcessor> | null>(null);
   const statusStyle =
     STATUS_STYLES[form.status] || STATUS_STYLES.online;
   const publicStatusStyle =
     STATUS_STYLES[profile.status] || STATUS_STYLES.online;
+
+  useEffect(() => {
+    setTwoFactorEnabled(profile.twoFactorEnabled);
+  }, [profile.twoFactorEnabled]);
 
   useEffect(() => {
     setForm({
@@ -81,10 +118,16 @@ export default function Settings({ onClose }: SettingsProps) {
       avatarUrl: profile.avatarUrl,
       about: profile.about,
       pushToTalkEnabled: profile.pushToTalkEnabled,
+      pushToMuteEnabled: profile.pushToMuteEnabled,
       pushToTalkKey: profile.pushToTalkKey,
+      audioInputSensitivity: profile.audioInputSensitivity,
+      noiseSuppressionMode: profile.noiseSuppressionMode,
       audioInputId: profile.audioInputId,
       audioOutputId: profile.audioOutputId,
       videoInputId: profile.videoInputId,
+      videoBackgroundMode: profile.videoBackgroundMode,
+      videoBackgroundImageUrl: profile.videoBackgroundImageUrl,
+      twoFactorEnabled: profile.twoFactorEnabled,
     });
   }, [
     profile.username,
@@ -92,10 +135,16 @@ export default function Settings({ onClose }: SettingsProps) {
     profile.avatarUrl,
     profile.about,
     profile.pushToTalkEnabled,
+    profile.pushToMuteEnabled,
     profile.pushToTalkKey,
+    profile.audioInputSensitivity,
+    profile.noiseSuppressionMode,
     profile.audioInputId,
     profile.audioOutputId,
     profile.videoInputId,
+    profile.videoBackgroundMode,
+    profile.videoBackgroundImageUrl,
+    profile.twoFactorEnabled,
   ]);
 
   async function saveProfile() {
@@ -115,10 +164,16 @@ export default function Settings({ onClose }: SettingsProps) {
       avatarUrl: form.avatarUrl,
       about: form.about,
       pushToTalkEnabled: form.pushToTalkEnabled,
+      pushToMuteEnabled: form.pushToMuteEnabled,
       pushToTalkKey: form.pushToTalkKey,
+      audioInputSensitivity: form.audioInputSensitivity,
+      noiseSuppressionMode: form.noiseSuppressionMode,
       audioInputId: form.audioInputId,
       audioOutputId: form.audioOutputId,
       videoInputId: form.videoInputId,
+      videoBackgroundMode: form.videoBackgroundMode,
+      videoBackgroundImageUrl: form.videoBackgroundImageUrl,
+      twoFactorEnabled: form.twoFactorEnabled,
     });
     setSaving(false);
 
@@ -128,6 +183,90 @@ export default function Settings({ onClose }: SettingsProps) {
     }
 
     setSuccess("Profile updated.");
+  }
+
+  async function beginTwoFactorSetup() {
+    setTwoFactorLoading(true);
+    setTwoFactorError("");
+    setTwoFactorMessage("");
+    try {
+      const res = await apiFetch("/api/auth/2fa/setup", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) {
+        setTwoFactorError(data.error || "Failed to start 2FA setup");
+        return;
+      }
+      setTwoFactorSetup({
+        secret: data.secret || "",
+        qrDataUrl: data.qrDataUrl || "",
+        expiresAt: data.expiresAt || "",
+      });
+      setTwoFactorCode("");
+    } catch (err) {
+      setTwoFactorError(err instanceof Error ? err.message : "Failed to start 2FA setup");
+    } finally {
+      setTwoFactorLoading(false);
+    }
+  }
+
+  async function enableTwoFactor() {
+    const code = twoFactorCode.replace(/\s+/g, "");
+    if (!/^\d{6}$/.test(code)) {
+      setTwoFactorError("Enter a valid 6-digit code.");
+      return;
+    }
+    setTwoFactorLoading(true);
+    setTwoFactorError("");
+    setTwoFactorMessage("");
+    try {
+      const res = await apiFetch("/api/auth/2fa/enable", {
+        method: "POST",
+        body: JSON.stringify({ code }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setTwoFactorError(data.error || "Failed to enable 2FA");
+        return;
+      }
+      setTwoFactorEnabled(true);
+      setTwoFactorSetup(null);
+      setTwoFactorCode("");
+      setTwoFactorMessage("Two-factor authentication enabled.");
+    } catch (err) {
+      setTwoFactorError(err instanceof Error ? err.message : "Failed to enable 2FA");
+    } finally {
+      setTwoFactorLoading(false);
+    }
+  }
+
+  async function disableTwoFactor() {
+    const code = twoFactorCode.replace(/\s+/g, "");
+    if (!/^\d{6}$/.test(code)) {
+      setTwoFactorError("Enter your current 6-digit code to disable 2FA.");
+      return;
+    }
+    setTwoFactorLoading(true);
+    setTwoFactorError("");
+    setTwoFactorMessage("");
+    try {
+      const res = await apiFetch("/api/auth/2fa/disable", {
+        method: "POST",
+        body: JSON.stringify({ code }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setTwoFactorError(data.error || "Failed to disable 2FA");
+        return;
+      }
+      setTwoFactorEnabled(false);
+      setTwoFactorSetup(null);
+      setTwoFactorCode("");
+      setTwoFactorMessage("Two-factor authentication disabled.");
+    } catch (err) {
+      setTwoFactorError(err instanceof Error ? err.message : "Failed to disable 2FA");
+    } finally {
+      setTwoFactorLoading(false);
+    }
   }
 
   async function handleSave(e: React.FormEvent) {
@@ -142,10 +281,16 @@ export default function Settings({ onClose }: SettingsProps) {
       avatarUrl: profile.avatarUrl,
       about: profile.about,
       pushToTalkEnabled: profile.pushToTalkEnabled,
+      pushToMuteEnabled: profile.pushToMuteEnabled,
       pushToTalkKey: profile.pushToTalkKey,
+      audioInputSensitivity: profile.audioInputSensitivity,
+      noiseSuppressionMode: profile.noiseSuppressionMode,
       audioInputId: profile.audioInputId,
       audioOutputId: profile.audioOutputId,
       videoInputId: profile.videoInputId,
+      videoBackgroundMode: profile.videoBackgroundMode,
+      videoBackgroundImageUrl: profile.videoBackgroundImageUrl,
+      twoFactorEnabled: profile.twoFactorEnabled,
     });
     setError("");
     setSuccess("");
@@ -247,6 +392,187 @@ export default function Settings({ onClose }: SettingsProps) {
     if (value.startsWith("Digit")) return value.replace("Digit", "");
     return value;
   }
+
+  async function playSpeakerTest() {
+    try {
+      const ctx = new AudioContext();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = 880;
+      gain.gain.value = 0.04;
+      osc.connect(gain).connect(ctx.destination);
+      osc.start();
+      window.setTimeout(() => {
+        osc.stop();
+        void ctx.close();
+      }, 350);
+    } catch (err) {
+      setDeviceError(err instanceof Error ? err.message : "Unable to play test tone");
+    }
+  }
+
+  function stopMicTest() {
+    if (micTestRafRef.current !== null) {
+      window.cancelAnimationFrame(micTestRafRef.current);
+      micTestRafRef.current = null;
+    }
+    if (micTestStreamRef.current) {
+      micTestStreamRef.current.getTracks().forEach((track) => track.stop());
+      micTestStreamRef.current = null;
+    }
+    if (micTestAudioCtxRef.current) {
+      void micTestAudioCtxRef.current.close();
+      micTestAudioCtxRef.current = null;
+    }
+    micTestAnalyserRef.current = null;
+    setMicLevel(0);
+    setMicTestActive(false);
+  }
+
+  async function startMicTest() {
+    try {
+      stopMicTest();
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: form.audioInputId
+          ? { deviceId: { ideal: form.audioInputId } }
+          : true,
+        video: false,
+      });
+      const audioCtx = new AudioContext();
+      const source = audioCtx.createMediaStreamSource(stream);
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 1024;
+      source.connect(analyser);
+      micTestStreamRef.current = stream;
+      micTestAudioCtxRef.current = audioCtx;
+      micTestAnalyserRef.current = analyser;
+      setMicTestActive(true);
+
+      const data = new Uint8Array(analyser.fftSize);
+      const tick = () => {
+        if (!micTestAnalyserRef.current) return;
+        micTestAnalyserRef.current.getByteTimeDomainData(data);
+        let sum = 0;
+        for (let i = 0; i < data.length; i += 1) {
+          const centered = (data[i] - 128) / 128;
+          sum += centered * centered;
+        }
+        const rms = Math.sqrt(sum / data.length);
+        setMicLevel(Math.min(1, rms * 3.2));
+        micTestRafRef.current = window.requestAnimationFrame(tick);
+      };
+      micTestRafRef.current = window.requestAnimationFrame(tick);
+    } catch (err) {
+      setDeviceError(err instanceof Error ? err.message : "Unable to start microphone test");
+      stopMicTest();
+    }
+  }
+
+  useEffect(() => {
+    return () => {
+      stopMicTest();
+      const track = videoPreviewTrackRef.current;
+      if (track) {
+        try {
+          track.detach();
+        } catch {
+          // no-op
+        }
+        track.stop();
+      }
+      videoPreviewTrackRef.current = null;
+      videoPreviewProcessorRef.current = null;
+    };
+  }, []);
+
+  async function applyPreviewBackground() {
+    const track = videoPreviewTrackRef.current;
+    if (!track) return;
+    if (!supportsBackgroundProcessors()) return;
+
+    if (!videoPreviewProcessorRef.current) {
+      const processor = BackgroundProcessor({ mode: "disabled" });
+      await track.setProcessor(processor);
+      videoPreviewProcessorRef.current = processor;
+    }
+
+    const processor = videoPreviewProcessorRef.current;
+    if (!processor) return;
+    if (form.videoBackgroundMode === "blur") {
+      await processor.switchTo({ mode: "background-blur", blurRadius: 12 });
+      return;
+    }
+    if (
+      form.videoBackgroundMode === "image" &&
+      form.videoBackgroundImageUrl.trim()
+    ) {
+      await processor.switchTo({
+        mode: "virtual-background",
+        imagePath: form.videoBackgroundImageUrl.trim(),
+      });
+      return;
+    }
+    await processor.switchTo({ mode: "disabled" });
+  }
+
+  async function stopVideoPreview() {
+    const track = videoPreviewTrackRef.current;
+    if (track) {
+      try {
+        await track.stopProcessor();
+      } catch {
+        // ignore when no processor is attached
+      }
+      track.detach();
+      track.stop();
+    }
+    videoPreviewTrackRef.current = null;
+    videoPreviewProcessorRef.current = null;
+    setVideoPreviewActive(false);
+  }
+
+  async function startVideoPreview() {
+    setVideoPreviewError(null);
+    try {
+      await stopVideoPreview();
+      const track = await createLocalVideoTrack(
+        form.videoInputId ? { deviceId: form.videoInputId } : undefined
+      );
+      videoPreviewTrackRef.current = track;
+      await applyPreviewBackground();
+      setVideoPreviewActive(true);
+    } catch (err) {
+      setVideoPreviewError(
+        err instanceof Error ? err.message : "Unable to start camera preview"
+      );
+      await stopVideoPreview();
+    }
+  }
+
+  useEffect(() => {
+    if (!videoPreviewActive) return;
+    void startVideoPreview();
+    // Recreate preview when selected camera changes.
+  }, [form.videoInputId]);
+
+  useEffect(() => {
+    if (!videoPreviewActive) return;
+    void applyPreviewBackground().catch(() => {
+      setVideoPreviewError("Background preview is not supported on this device/browser.");
+    });
+  }, [videoPreviewActive, form.videoBackgroundMode, form.videoBackgroundImageUrl]);
+
+  useEffect(() => {
+    if (!videoPreviewActive) return;
+    const track = videoPreviewTrackRef.current;
+    const el = videoPreviewElRef.current;
+    if (!track || !el) return;
+    track.attach(el);
+    return () => {
+      track.detach(el);
+    };
+  }, [videoPreviewActive]);
 
   function handleBack() {
     if (onClose) {
@@ -379,6 +705,44 @@ export default function Settings({ onClose }: SettingsProps) {
 
             {activeTab === "settings" ? (
               <form onSubmit={handleSave} className="space-y-6">
+                <div className="settings-section-nav" role="tablist" aria-label="Settings sections">
+                  <button
+                    type="button"
+                    className={`settings-tab ${activeSettingsSection === "identity" ? "active" : ""}`}
+                    onClick={() => setActiveSettingsSection("identity")}
+                  >
+                    Identity
+                  </button>
+                  <button
+                    type="button"
+                    className={`settings-tab ${activeSettingsSection === "appearance" ? "active" : ""}`}
+                    onClick={() => setActiveSettingsSection("appearance")}
+                  >
+                    Appearance
+                  </button>
+                  <button
+                    type="button"
+                    className={`settings-tab ${activeSettingsSection === "voice" ? "active" : ""}`}
+                    onClick={() => setActiveSettingsSection("voice")}
+                  >
+                    Voice & Video
+                  </button>
+                  <button
+                    type="button"
+                    className={`settings-tab ${activeSettingsSection === "security" ? "active" : ""}`}
+                    onClick={() => setActiveSettingsSection("security")}
+                  >
+                    Security
+                  </button>
+                  <button
+                    type="button"
+                    className={`settings-tab ${activeSettingsSection === "about" ? "active" : ""}`}
+                    onClick={() => setActiveSettingsSection("about")}
+                  >
+                    About
+                  </button>
+                </div>
+                {activeSettingsSection === "identity" && (
                 <div className="profile-section">
                   <div className="profile-section-title">Identity</div>
                   <div className="profile-grid">
@@ -421,7 +785,9 @@ export default function Settings({ onClose }: SettingsProps) {
                     </div>
                   </div>
                 </div>
+                )}
 
+                {activeSettingsSection === "appearance" && (
                 <div className="profile-section">
                   <div className="profile-section-title">Appearance</div>
                   <div>
@@ -461,7 +827,9 @@ export default function Settings({ onClose }: SettingsProps) {
                     </div>
                   </div>
                 </div>
+                )}
 
+                {activeSettingsSection === "voice" && (
                 <div className="profile-section">
                   <div className="profile-section-title">Voice & Video</div>
                   <div className="profile-grid">
@@ -473,6 +841,7 @@ export default function Settings({ onClose }: SettingsProps) {
                           setForm((prev) => ({
                             ...prev,
                             pushToTalkEnabled: !prev.pushToTalkEnabled,
+                            pushToMuteEnabled: !prev.pushToTalkEnabled ? false : prev.pushToMuteEnabled,
                           }))
                         }
                         className={`ptt-toggle ${
@@ -480,6 +849,24 @@ export default function Settings({ onClose }: SettingsProps) {
                         }`}
                       >
                         {form.pushToTalkEnabled ? "Enabled" : "Disabled"}
+                      </button>
+                    </div>
+                    <div>
+                      <label className="profile-label">Push-to-mute</label>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setForm((prev) => ({
+                            ...prev,
+                            pushToMuteEnabled: !prev.pushToMuteEnabled,
+                            pushToTalkEnabled: !prev.pushToMuteEnabled ? false : prev.pushToTalkEnabled,
+                          }))
+                        }
+                        className={`ptt-toggle ${
+                          form.pushToMuteEnabled ? "active" : ""
+                        }`}
+                      >
+                        {form.pushToMuteEnabled ? "Enabled" : "Disabled"}
                       </button>
                     </div>
                     <div>
@@ -495,6 +882,80 @@ export default function Settings({ onClose }: SettingsProps) {
                       </button>
                     </div>
                   </div>
+                  <div style={{ marginTop: 12 }}>
+                    <label className="profile-label">
+                      Input sensitivity ({Math.round(form.audioInputSensitivity * 100)}%)
+                    </label>
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      step={1}
+                      value={Math.round(form.audioInputSensitivity * 100)}
+                      onChange={(e) =>
+                        setForm((prev) => ({
+                          ...prev,
+                          audioInputSensitivity: Number(e.target.value) / 100,
+                        }))
+                      }
+                      className="voice-mix-slider"
+                    />
+                  </div>
+                  <div style={{ marginTop: 12 }}>
+                    <label className="profile-label">Noise suppression</label>
+                    <select
+                      className="profile-select"
+                      value={form.noiseSuppressionMode}
+                      onChange={(e) =>
+                        setForm((prev) => ({
+                          ...prev,
+                          noiseSuppressionMode: e.target.value as
+                            | "off"
+                            | "standard"
+                            | "aggressive"
+                            | "rnnoise",
+                        }))
+                      }
+                    >
+                      <option value="off">Off</option>
+                      <option value="standard">Standard</option>
+                      <option value="aggressive">Aggressive</option>
+                      <option value="rnnoise">RNNoise (High)</option>
+                    </select>
+                  </div>
+                  <div style={{ marginTop: 12 }}>
+                    <label className="profile-label">Video background</label>
+                    <select
+                      className="profile-select"
+                      value={form.videoBackgroundMode}
+                      onChange={(e) =>
+                        setForm((prev) => ({
+                          ...prev,
+                          videoBackgroundMode: e.target.value as "off" | "blur" | "image",
+                        }))
+                      }
+                    >
+                      <option value="off">Off</option>
+                      <option value="blur">Blur</option>
+                      <option value="image">Image</option>
+                    </select>
+                  </div>
+                  {form.videoBackgroundMode === "image" && (
+                    <div style={{ marginTop: 12 }}>
+                      <label className="profile-label">Background image URL</label>
+                      <input
+                        className="profile-input"
+                        value={form.videoBackgroundImageUrl}
+                        onChange={(e) =>
+                          setForm((prev) => ({
+                            ...prev,
+                            videoBackgroundImageUrl: e.target.value,
+                          }))
+                        }
+                        placeholder="https://..."
+                      />
+                    </div>
+                  )}
                   <div className="profile-grid profile-grid--three">
                     <div>
                       <label className="profile-label">Microphone</label>
@@ -557,6 +1018,61 @@ export default function Settings({ onClose }: SettingsProps) {
                       </select>
                     </div>
                   </div>
+                  <div style={{ marginTop: 12 }}>
+                    <label className="profile-label">Video background preview</label>
+                    <div
+                      style={{
+                        width: "100%",
+                        maxWidth: 420,
+                        aspectRatio: "16 / 9",
+                        borderRadius: 12,
+                        border: "1px solid var(--border)",
+                        overflow: "hidden",
+                        background: "var(--bg-secondary)",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                      }}
+                    >
+                      {videoPreviewActive ? (
+                        <video
+                          ref={videoPreviewElRef}
+                          autoPlay
+                          muted
+                          playsInline
+                          style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                        />
+                      ) : (
+                        <span className="text-xs text-[var(--text-muted)]">
+                          Camera preview is off
+                        </span>
+                      )}
+                    </div>
+                    <div className="profile-device-row" style={{ marginTop: 8 }}>
+                      {videoPreviewActive ? (
+                        <button
+                          type="button"
+                          className="profile-button secondary"
+                          onClick={() => void stopVideoPreview()}
+                        >
+                          Stop preview
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className="profile-button secondary"
+                          onClick={() => void startVideoPreview()}
+                        >
+                          Start preview
+                        </button>
+                      )}
+                      {videoPreviewError && (
+                        <span className="text-xs text-[var(--danger)]">
+                          {videoPreviewError}
+                        </span>
+                      )}
+                    </div>
+                  </div>
                   <div className="profile-device-row">
                     <button
                       type="button"
@@ -565,20 +1081,169 @@ export default function Settings({ onClose }: SettingsProps) {
                     >
                       Refresh devices
                     </button>
+                    <button
+                      type="button"
+                      className="profile-button secondary"
+                      onClick={() => void playSpeakerTest()}
+                    >
+                      Test speakers
+                    </button>
+                    {micTestActive ? (
+                      <button
+                        type="button"
+                        className="profile-button secondary"
+                        onClick={stopMicTest}
+                      >
+                        Stop mic test
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="profile-button secondary"
+                        onClick={() => void startMicTest()}
+                      >
+                        Test microphone
+                      </button>
+                    )}
                     {deviceError && (
                       <span className="text-xs text-[var(--danger)]">
                         {deviceError}
                       </span>
                     )}
                   </div>
+                  <div style={{ marginTop: 8 }}>
+                    <label className="profile-label">Mic level</label>
+                    <div className="chat-upload-progress-track">
+                      <div
+                        className="chat-upload-progress-fill"
+                        style={{ width: `${Math.round(micLevel * 100)}%` }}
+                      />
+                    </div>
+                  </div>
                   <p className="text-xs text-[var(--text-muted)]" style={{ marginTop: 8 }}>
                     Screen share quality is chosen when you start sharing.
                   </p>
                   <p className="text-xs text-[var(--text-muted)]">
-                    Hold your PTT key to transmit when enabled.
+                    Hold your key to transmit (PTT) or to mute (PTM).
                   </p>
                 </div>
+                )}
 
+                {activeSettingsSection === "security" && (
+                <div className="profile-section">
+                  <div className="profile-section-title">Security</div>
+                  <div className="text-xs text-[var(--text-muted)]" style={{ marginBottom: 10 }}>
+                    Two-factor authentication (authenticator app)
+                  </div>
+                  <div className="profile-device-row">
+                    {!twoFactorEnabled ? (
+                      <button
+                        type="button"
+                        className="profile-button secondary"
+                        onClick={() => void beginTwoFactorSetup()}
+                        disabled={twoFactorLoading}
+                      >
+                        {twoFactorLoading ? "Preparing..." : "Set up 2FA"}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="profile-button secondary"
+                        onClick={() => void disableTwoFactor()}
+                        disabled={twoFactorLoading}
+                      >
+                        {twoFactorLoading ? "Saving..." : "Disable 2FA"}
+                      </button>
+                    )}
+                    <span className="text-xs text-[var(--text-muted)]">
+                      Status: {twoFactorEnabled ? "Enabled" : "Disabled"}
+                    </span>
+                  </div>
+                  {twoFactorSetup && !twoFactorEnabled && (
+                    <div style={{ marginTop: 12 }}>
+                      <div className="text-xs text-[var(--text-muted)]" style={{ marginBottom: 8 }}>
+                        Scan QR in Google Authenticator, 1Password, Authy, etc.
+                      </div>
+                      {twoFactorSetup.qrDataUrl ? (
+                        <img
+                          src={twoFactorSetup.qrDataUrl}
+                          alt="2FA QR code"
+                          style={{
+                            width: 180,
+                            height: 180,
+                            borderRadius: 8,
+                            border: "1px solid var(--border)",
+                            background: "#fff",
+                            padding: 6,
+                          }}
+                        />
+                      ) : null}
+                      <div className="text-xs text-[var(--text-muted)]" style={{ marginTop: 8 }}>
+                        Manual key: <span className="font-mono">{twoFactorSetup.secret}</span>
+                      </div>
+                      <div className="text-xs text-[var(--text-muted)]" style={{ marginTop: 4 }}>
+                        Expires: {new Date(twoFactorSetup.expiresAt).toLocaleString()}
+                      </div>
+                      <div style={{ marginTop: 10, maxWidth: 280 }}>
+                        <label className="profile-label">Authenticator code</label>
+                        <input
+                          className="profile-input"
+                          value={twoFactorCode}
+                          onChange={(e) => setTwoFactorCode(e.target.value)}
+                          placeholder="123456"
+                          inputMode="numeric"
+                        />
+                      </div>
+                      <div className="profile-device-row" style={{ marginTop: 10 }}>
+                        <button
+                          type="button"
+                          className="profile-button"
+                          onClick={() => void enableTwoFactor()}
+                          disabled={twoFactorLoading}
+                        >
+                          {twoFactorLoading ? "Verifying..." : "Enable 2FA"}
+                        </button>
+                        <button
+                          type="button"
+                          className="profile-button secondary"
+                          onClick={() => {
+                            setTwoFactorSetup(null);
+                            setTwoFactorCode("");
+                            setTwoFactorError("");
+                          }}
+                          disabled={twoFactorLoading}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {twoFactorEnabled && (
+                    <div style={{ marginTop: 10, maxWidth: 280 }}>
+                      <label className="profile-label">Code to disable</label>
+                      <input
+                        className="profile-input"
+                        value={twoFactorCode}
+                        onChange={(e) => setTwoFactorCode(e.target.value)}
+                        placeholder="123456"
+                        inputMode="numeric"
+                      />
+                    </div>
+                  )}
+                  {twoFactorError && (
+                    <div className="text-sm text-[var(--danger)]" style={{ marginTop: 10 }}>
+                      {twoFactorError}
+                    </div>
+                  )}
+                  {twoFactorMessage && (
+                    <div className="text-sm text-[var(--success)]" style={{ marginTop: 10 }}>
+                      {twoFactorMessage}
+                    </div>
+                  )}
+                </div>
+                )}
+
+                {activeSettingsSection === "about" && (
                 <div className="profile-section">
                   <div className="profile-section-title">About</div>
                   <textarea
@@ -590,6 +1255,7 @@ export default function Settings({ onClose }: SettingsProps) {
                     placeholder="A short bio or what you are working on"
                   />
                 </div>
+                )}
 
                 {error && (
                   <div className="text-sm text-[var(--danger)]">{error}</div>

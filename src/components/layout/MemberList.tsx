@@ -7,9 +7,12 @@ import {
   useState,
 } from "react";
 import { Mic, ChevronDown, ChevronRight, MessageCircle } from "lucide-react";
+import type { Socket } from "socket.io-client";
 import type { ServerUser } from "../../types";
 
 interface MemberListProps {
+  socket: Socket;
+  isConnected: boolean;
   users: ServerUser[];
   voiceParticipants: Record<
     string,
@@ -29,6 +32,11 @@ interface MemberListProps {
   onEndCall: () => void;
   onLeaveCall: () => void;
   onToggle: () => void;
+  canManageRoles: boolean;
+  canKickMembers: boolean;
+  canBanMembers: boolean;
+  canTimeoutMembers: boolean;
+  canModerateVoice: boolean;
 }
 
 const STATUS_ORDER = ["online", "away", "dnd", "offline"] as const;
@@ -79,7 +87,12 @@ function MemberItem({
         />
       </div>
       <span className="member-meta">
-        <span className="member-name">{user.username}</span>
+        <span
+          className="member-name"
+          style={{ color: user.role_color || undefined }}
+        >
+          {user.username}
+        </span>
         {user.activity_game && user.status !== "offline" && (
           <span className="member-activity">Playing {user.activity_game}</span>
         )}
@@ -104,6 +117,8 @@ function MemberItem({
 }
 
 export default function MemberList({
+  socket,
+  isConnected,
   users,
   voiceParticipants,
   currentUserId,
@@ -116,7 +131,19 @@ export default function MemberList({
   onEndCall,
   onLeaveCall,
   onToggle,
+  canManageRoles,
+  canKickMembers,
+  canBanMembers,
+  canTimeoutMembers,
+  canModerateVoice,
 }: MemberListProps) {
+  type RoleSummary = {
+    id: string;
+    name: string;
+    color: string;
+    position: number;
+    is_system: number;
+  };
   const [offlineCollapsed, setOfflineCollapsed] = useState(false);
   const [contextMenu, setContextMenu] = useState<{
     x: number;
@@ -126,6 +153,104 @@ export default function MemberList({
   } | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const CONTEXT_MENU_MARGIN = 8;
+  const [roles, setRoles] = useState<RoleSummary[]>([]);
+  const [userRoles, setUserRoles] = useState<Record<string, string[]>>({});
+  const [roleBusy, setRoleBusy] = useState<string | null>(null);
+  const [roleError, setRoleError] = useState<string>("");
+  const [moderationBusy, setModerationBusy] = useState(false);
+  const [moderationError, setModerationError] = useState("");
+
+  useEffect(() => {
+    if (!canManageRoles || !isConnected) return;
+
+    function applyRoleState(payload: {
+      roles?: RoleSummary[];
+      userRoles?: Record<string, string[]>;
+    }) {
+      const nextRoles = [...(payload.roles || [])].sort(
+        (a, b) => a.position - b.position
+      );
+      setRoles(nextRoles);
+      setUserRoles(payload.userRoles || {});
+    }
+
+    socket.emit(
+      "roles:get",
+      (ack?: {
+        ok: boolean;
+        error?: string;
+        roles?: RoleSummary[];
+        userRoles?: Record<string, string[]>;
+      }) => {
+        if (!ack?.ok) {
+          setRoleError(ack?.error || "Could not load role state.");
+          return;
+        }
+        applyRoleState({ roles: ack.roles, userRoles: ack.userRoles });
+      }
+    );
+
+    function onRoleState(payload: {
+      roles: RoleSummary[];
+      userRoles: Record<string, string[]>;
+    }) {
+      applyRoleState(payload);
+    }
+    socket.on("roles:state", onRoleState);
+
+    return () => {
+      socket.off("roles:state", onRoleState);
+    };
+  }, [canManageRoles, isConnected, socket]);
+
+  function userHasRole(userId: string, roleId: string) {
+    return (userRoles[userId] || []).includes(roleId);
+  }
+
+  function toggleRoleForUser(targetUserId: string, roleId: string, active: boolean) {
+    setRoleBusy(`${targetUserId}:${roleId}`);
+    setRoleError("");
+    socket.emit(
+      "user:role:set",
+      { userId: targetUserId, roleId, active },
+      (ack?: { ok: boolean; error?: string }) => {
+        setRoleBusy(null);
+        if (!ack?.ok) {
+          setRoleError(ack?.error || "Failed to update role.");
+        }
+      }
+    );
+  }
+
+  function runModerationAction(
+    targetUserId: string,
+    action:
+      | "kick"
+      | "ban"
+      | "unban"
+      | "timeout"
+      | "clear-timeout"
+      | "server-mute"
+      | "server-unmute"
+      | "server-deafen"
+      | "server-undeafen",
+    durationMinutes?: number
+  ) {
+    setModerationBusy(true);
+    setModerationError("");
+    socket.emit(
+      "user:moderation:action",
+      { userId: targetUserId, action, durationMinutes },
+      (ack?: { ok: boolean; error?: string }) => {
+        setModerationBusy(false);
+        if (!ack?.ok) {
+          setModerationError(ack?.error || "Moderation action failed.");
+          return;
+        }
+        setContextMenu(null);
+      }
+    );
+  }
 
   useLayoutEffect(() => {
     if (!contextMenu || !menuRef.current) return;
@@ -220,6 +345,9 @@ export default function MemberList({
     grouped.online.length + grouped.away.length + grouped.dnd.length;
   const isCallOwner = Boolean(
     activeCall && currentUserId && activeCall.ownerUserId === currentUserId
+  );
+  const submenuOpensLeft = Boolean(
+    contextMenu && contextMenu.x > window.innerWidth - 430
   );
 
   return (
@@ -393,6 +521,163 @@ export default function MemberList({
           >
             View Profile
           </button>
+          {canManageRoles && (
+            <div className="member-context-submenu-wrap">
+              <button type="button" className="member-context-menu-item member-context-submenu-trigger">
+                <span>Assign Roles</span>
+                <ChevronRight size={12} />
+              </button>
+              <div
+                className={`member-context-submenu ${
+                  submenuOpensLeft ? "open-left" : ""
+                }`}
+              >
+                {roles.length === 0 ? (
+                  <div className="member-context-menu-note">Loading roles...</div>
+                ) : (
+                  roles.map((role) => {
+                    const checked =
+                      role.id === "everyone" ||
+                      userHasRole(contextMenu.user.id, role.id);
+                    const disabled = role.id === "everyone";
+                    return (
+                      <label key={role.id} className="member-context-role-item">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          disabled={disabled || roleBusy === `${contextMenu.user.id}:${role.id}`}
+                          onChange={(event) =>
+                            toggleRoleForUser(
+                              contextMenu.user.id,
+                              role.id,
+                              event.target.checked
+                            )
+                          }
+                        />
+                        <span style={{ color: role.color, fontWeight: 700 }}>{role.name}</span>
+                      </label>
+                    );
+                  })
+                )}
+                {roleError && (
+                  <div className="member-context-menu-note member-context-menu-note-error">
+                    {roleError}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+          {(canKickMembers || canBanMembers || canTimeoutMembers || canModerateVoice) && !contextMenu.isSelf && (
+            <div className="member-context-submenu-wrap">
+              <button type="button" className="member-context-menu-item member-context-submenu-trigger">
+                <span>Moderation</span>
+                <ChevronRight size={12} />
+              </button>
+              <div
+                className={`member-context-submenu ${
+                  submenuOpensLeft ? "open-left" : ""
+                }`}
+              >
+                {canKickMembers && (
+                  <button
+                    type="button"
+                    className="member-context-menu-item"
+                    disabled={moderationBusy}
+                    onClick={() => runModerationAction(contextMenu.user.id, "kick")}
+                  >
+                    Kick user
+                  </button>
+                )}
+                {canBanMembers && (
+                  <button
+                    type="button"
+                    className="member-context-menu-item"
+                    disabled={moderationBusy}
+                    onClick={() => runModerationAction(contextMenu.user.id, "ban")}
+                  >
+                    Ban user
+                  </button>
+                )}
+                {canTimeoutMembers && (
+                  <>
+                    <button
+                      type="button"
+                      className="member-context-menu-item"
+                      disabled={moderationBusy}
+                      onClick={() => runModerationAction(contextMenu.user.id, "timeout", 10)}
+                    >
+                      Timeout 10m
+                    </button>
+                    <button
+                      type="button"
+                      className="member-context-menu-item"
+                      disabled={moderationBusy}
+                      onClick={() => runModerationAction(contextMenu.user.id, "timeout", 60)}
+                    >
+                      Timeout 1h
+                    </button>
+                    <button
+                      type="button"
+                      className="member-context-menu-item"
+                      disabled={moderationBusy}
+                      onClick={() => runModerationAction(contextMenu.user.id, "timeout", 1440)}
+                    >
+                      Timeout 1d
+                    </button>
+                    <button
+                      type="button"
+                      className="member-context-menu-item"
+                      disabled={moderationBusy}
+                      onClick={() => runModerationAction(contextMenu.user.id, "clear-timeout")}
+                    >
+                      Clear timeout
+                    </button>
+                  </>
+                )}
+                {canModerateVoice && (
+                  <>
+                    <button
+                      type="button"
+                      className="member-context-menu-item"
+                      disabled={moderationBusy}
+                      onClick={() => runModerationAction(contextMenu.user.id, "server-mute")}
+                    >
+                      Server mute
+                    </button>
+                    <button
+                      type="button"
+                      className="member-context-menu-item"
+                      disabled={moderationBusy}
+                      onClick={() => runModerationAction(contextMenu.user.id, "server-unmute")}
+                    >
+                      Server unmute
+                    </button>
+                    <button
+                      type="button"
+                      className="member-context-menu-item"
+                      disabled={moderationBusy}
+                      onClick={() => runModerationAction(contextMenu.user.id, "server-deafen")}
+                    >
+                      Server deafen
+                    </button>
+                    <button
+                      type="button"
+                      className="member-context-menu-item"
+                      disabled={moderationBusy}
+                      onClick={() => runModerationAction(contextMenu.user.id, "server-undeafen")}
+                    >
+                      Server undeafen
+                    </button>
+                  </>
+                )}
+                {moderationError && (
+                  <div className="member-context-menu-note member-context-menu-note-error">
+                    {moderationError}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       )}
     </aside>

@@ -9,6 +9,7 @@ export interface ServerUser {
   id: string;
   username: string;
   avatar_url: string | null;
+  role_color?: string | null;
   status: "online" | "offline" | "away" | "dnd";
   about: string | null;
   activity_game?: string | null;
@@ -77,6 +78,12 @@ export interface Message {
   user_id: string;
   username: string;
   avatar_url?: string;
+  role_color?: string | null;
+  reply_to_message_id?: string | null;
+  reply_to_id?: string | null;
+  reply_to_username?: string | null;
+  reply_to_content?: string | null;
+  pinned?: boolean | number;
   client_nonce?: string;
   pending?: boolean;
   failed?: boolean;

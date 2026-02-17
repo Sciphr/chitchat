@@ -5,6 +5,7 @@ import { ChevronLeft } from "lucide-react";
 import Sidebar from "../components/layout/Sidebar";
 import MemberList from "../components/layout/MemberList";
 import PublicProfileModal from "../components/profile/PublicProfileModal";
+import AccessManagerModal from "../components/admin/AccessManagerModal";
 import ChatRoom from "../components/chat/ChatRoom";
 import VoiceChannel from "../components/voice/VoiceChannel";
 import Settings from "./Settings";
@@ -51,6 +52,7 @@ export default function Home() {
     Record<string, Array<{ id: string; name: string; isSpeaking: boolean }>>
   >({});
   const [showSettings, setShowSettings] = useState(false);
+  const [showAccessManager, setShowAccessManager] = useState(false);
   const [viewedProfile, setViewedProfile] = useState<ServerUser | null>(null);
   const [voiceControls, setVoiceControls] = useState<VoiceControls | null>(
     null
@@ -80,6 +82,8 @@ export default function Home() {
     name: string;
     maintenanceMode: boolean;
     userCanCreateRooms?: boolean;
+    serverAnnouncement?: string;
+    serverAnnouncementId?: string;
   } | null>(null);
   const lastNotificationSoundAtRef = useRef(0);
   const lastNonCallRoomRef = useRef<Room | null>(null);
@@ -129,12 +133,16 @@ export default function Home() {
           name?: string;
           maintenanceMode?: boolean;
           userCanCreateRooms?: boolean;
+          serverAnnouncement?: string;
+          serverAnnouncementId?: string;
         };
         if (cancelled) return;
         setServerInfo({
           name: data.name || "Server",
           maintenanceMode: Boolean(data.maintenanceMode),
           userCanCreateRooms: data.userCanCreateRooms,
+          serverAnnouncement: data.serverAnnouncement || "",
+          serverAnnouncementId: data.serverAnnouncementId || "",
         });
       } catch {
         if (!cancelled) {
@@ -281,6 +289,30 @@ export default function Home() {
 
   function handleRenameCategory(categoryId: string, name: string) {
     socket.emit("category:rename", { categoryId, name });
+  }
+
+  function handleDeleteRoom(roomId: string) {
+    socket.emit(
+      "room:delete",
+      { roomId },
+      (ack?: { ok: boolean; error?: string }) => {
+        if (!ack?.ok) {
+          console.warn("Failed to delete room:", ack?.error || "unknown error");
+        }
+      }
+    );
+  }
+
+  function handleDeleteCategory(categoryId: string) {
+    socket.emit(
+      "category:delete",
+      { categoryId },
+      (ack?: { ok: boolean; error?: string }) => {
+        if (!ack?.ok) {
+          console.warn("Failed to delete category:", ack?.error || "unknown error");
+        }
+      }
+    );
   }
 
   function handleStartCall(targetUser: ServerUser) {
@@ -730,6 +762,31 @@ export default function Home() {
     }
     return Array.from(set);
   }, [serverUsers, profile.username, dmRooms]);
+  const canManageRoles = Boolean(user?.permissions.canManageRoles || user?.isAdmin);
+  const canManageChannels = Boolean(user?.permissions.canManageChannels || user?.isAdmin);
+  const canKickMembers = Boolean(user?.permissions.canKickMembers || user?.isAdmin);
+  const canBanMembers = Boolean(user?.permissions.canBanMembers || user?.isAdmin);
+  const canTimeoutMembers = Boolean(user?.permissions.canTimeoutMembers || user?.isAdmin);
+  const canModerateVoice = Boolean(user?.permissions.canModerateVoice || user?.isAdmin);
+  const canPinMessages = Boolean(user?.permissions.canPinMessages || user?.isAdmin);
+  const canManageMessages = Boolean(user?.permissions.canManageMessages || user?.isAdmin);
+  const canUseEmojis = Boolean(user?.permissions.canUseEmojis ?? true);
+  const canCreateRooms = Boolean(
+    canManageChannels || serverInfo?.userCanCreateRooms !== false
+  );
+  const announcementId = serverInfo?.serverAnnouncementId || "";
+  const announcementText = (serverInfo?.serverAnnouncement || "").trim();
+  const announcementStorageKey = `chitchat-announcement-dismissed:${serverUrl}:${announcementId}`;
+  const [announcementDismissed, setAnnouncementDismissed] = useState(false);
+
+  useEffect(() => {
+    if (!announcementId) {
+      setAnnouncementDismissed(false);
+      return;
+    }
+    const dismissed = localStorage.getItem(announcementStorageKey) === "1";
+    setAnnouncementDismissed(dismissed);
+  }, [announcementId, announcementStorageKey]);
 
   if (loading || !token) {
     return (
@@ -754,12 +811,15 @@ export default function Home() {
           onCreateCategory={handleCreateCategory}
           onRenameRoom={handleRenameRoom}
           onRenameCategory={handleRenameCategory}
+          onDeleteRoom={handleDeleteRoom}
+          onDeleteCategory={handleDeleteCategory}
           onUpdateLayout={handleLayoutUpdate}
           username={profile.username}
           status={profile.status}
           avatarUrl={profile.avatarUrl}
           voiceParticipants={voiceParticipants}
           onOpenSettings={() => setShowSettings(true)}
+          onOpenAccessManager={() => setShowAccessManager(true)}
           onSignOut={handleSignOut}
           voiceControls={voiceControls}
           unreadByRoom={unreadByRoom}
@@ -776,10 +836,9 @@ export default function Home() {
           isServerConnected={isConnected}
           isServerReconnecting={isReconnecting}
           serverMaintenanceMode={Boolean(serverInfo?.maintenanceMode)}
-          canCreateRooms={Boolean(
-            user?.isAdmin || serverInfo?.userCanCreateRooms !== false
-          )}
-          canManageChannels={Boolean(user?.isAdmin)}
+          canCreateRooms={canCreateRooms}
+          canManageChannels={canManageChannels}
+          canManageRoles={canManageRoles}
         />
 
         {/* Main content area */}
@@ -801,6 +860,21 @@ export default function Home() {
             </div>
           )}
           <div className="flex-1 flex flex-col rounded-2xl panel overflow-hidden">
+            {announcementText && !announcementDismissed && (
+              <div className="server-announcement-banner">
+                <span>{announcementText}</span>
+                <button
+                  type="button"
+                  className="server-announcement-close"
+                  onClick={() => {
+                    setAnnouncementDismissed(true);
+                    localStorage.setItem(announcementStorageKey, "1");
+                  }}
+                >
+                  x
+                </button>
+              </div>
+            )}
             {activeRoom ? (
               activeRoom.type === "text" || activeRoom.type === "dm" ? (
                 <ChatRoom
@@ -811,6 +885,9 @@ export default function Home() {
                   currentUsername={profile.username}
                   currentAvatarUrl={profile.avatarUrl}
                   isAdmin={user?.isAdmin ?? false}
+                  canManageMessages={canManageMessages}
+                  canPinMessages={canPinMessages}
+                  canUseEmojis={canUseEmojis}
                   unreadCount={unreadByRoom[activeRoom.id] ?? 0}
                   firstUnreadAt={firstUnreadAtByRoom[activeRoom.id]}
                   onMarkRead={markRoomRead}
@@ -846,6 +923,8 @@ export default function Home() {
         {/* Right sidebar: Member list */}
         {memberListOpen ? (
           <MemberList
+            socket={socket}
+            isConnected={isConnected}
             users={serverUsers}
             voiceParticipants={voiceParticipants}
             currentUserId={user?.id ?? null}
@@ -866,6 +945,11 @@ export default function Home() {
             onEndCall={handleEndCall}
             onLeaveCall={handleLeaveCall}
             onToggle={toggleMemberList}
+            canManageRoles={canManageRoles}
+            canKickMembers={canKickMembers}
+            canBanMembers={canBanMembers}
+            canTimeoutMembers={canTimeoutMembers}
+            canModerateVoice={canModerateVoice}
           />
         ) : (
           <div className="member-list-collapsed">
@@ -894,6 +978,16 @@ export default function Home() {
 
       {showSettings && (
         <Settings onClose={() => setShowSettings(false)} />
+      )}
+      {showAccessManager && (
+        <AccessManagerModal
+          socket={socket}
+          isConnected={isConnected}
+          users={serverUsers}
+          rooms={rooms}
+          canManageRoles={canManageRoles}
+          onClose={() => setShowAccessManager(false)}
+        />
       )}
       {viewedProfile && (
         <PublicProfileModal

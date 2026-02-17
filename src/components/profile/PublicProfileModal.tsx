@@ -51,7 +51,12 @@ export default function PublicProfileModal({
               user.username.charAt(0).toUpperCase()
             )}
           </div>
-          <div className="public-profile-name heading-font">{user.username}</div>
+          <div
+            className="public-profile-name heading-font"
+            style={user.role_color ? { color: user.role_color } : undefined}
+          >
+            {user.username}
+          </div>
           <div className="public-profile-status">
             <span
               className="public-profile-status-dot"

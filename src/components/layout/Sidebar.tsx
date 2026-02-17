@@ -29,6 +29,8 @@ interface SidebarProps {
   onCreateCategory: (name: string) => void;
   onRenameRoom: (roomId: string, name: string) => void;
   onRenameCategory: (categoryId: string, name: string) => void;
+  onDeleteRoom: (roomId: string) => void;
+  onDeleteCategory: (categoryId: string) => void;
   onUpdateLayout: (payload: {
     categories: Array<{ id: string; position: number; enforceTypeOrder: boolean }>;
     rooms: Array<{ id: string; categoryId: string; position: number }>;
@@ -41,6 +43,7 @@ interface SidebarProps {
     Array<{ id: string; name: string; isSpeaking: boolean }>
   >;
   onOpenSettings: () => void;
+  onOpenAccessManager: () => void;
   onSignOut: () => void;
   voiceControls: VoiceControls | null;
   unreadByRoom: Record<string, number>;
@@ -59,6 +62,7 @@ interface SidebarProps {
   serverMaintenanceMode: boolean;
   canCreateRooms: boolean;
   canManageChannels: boolean;
+  canManageRoles: boolean;
 }
 
 export default function Sidebar({
@@ -71,12 +75,15 @@ export default function Sidebar({
   onCreateCategory,
   onRenameRoom,
   onRenameCategory,
+  onDeleteRoom,
+  onDeleteCategory,
   onUpdateLayout,
   username,
   status,
   avatarUrl,
   voiceParticipants,
   onOpenSettings,
+  onOpenAccessManager,
   onSignOut,
   voiceControls,
   unreadByRoom,
@@ -95,6 +102,7 @@ export default function Sidebar({
   serverMaintenanceMode,
   canCreateRooms,
   canManageChannels,
+  canManageRoles,
 }: SidebarProps) {
   type SidebarContextMenu = {
     x: number;
@@ -117,6 +125,11 @@ export default function Sidebar({
   const [renameTarget, setRenameTarget] = useState<{
     kind: "room" | "category";
     id: string;
+  } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{
+    kind: "room" | "category";
+    id: string;
+    name: string;
   } | null>(null);
   const [contextMenu, setContextMenu] = useState<SidebarContextMenu | null>(null);
   const [showSharePicker, setShowSharePicker] = useState(false);
@@ -576,6 +589,41 @@ export default function Sidebar({
     closeRenameModal();
   }
 
+  function openDeleteFromContextMenu() {
+    if (
+      !contextMenu ||
+      !contextMenu.renameKind ||
+      !contextMenu.renameId ||
+      !contextMenu.renameName
+    ) {
+      return;
+    }
+    if (contextMenu.renameKind === "category" && contextMenu.renameId === "default") {
+      setContextMenu(null);
+      return;
+    }
+    setDeleteTarget({
+      kind: contextMenu.renameKind,
+      id: contextMenu.renameId,
+      name: contextMenu.renameName,
+    });
+    setContextMenu(null);
+  }
+
+  function closeDeleteModal() {
+    setDeleteTarget(null);
+  }
+
+  function submitDelete() {
+    if (!deleteTarget) return;
+    if (deleteTarget.kind === "room") {
+      onDeleteRoom(deleteTarget.id);
+    } else {
+      onDeleteCategory(deleteTarget.id);
+    }
+    closeDeleteModal();
+  }
+
   function formatBadgeCount(count: number) {
     if (count > 99) return "99+";
     return String(count);
@@ -872,6 +920,21 @@ export default function Sidebar({
                   : "Rename channel"}
               </button>
             )}
+          {(contextMenu.scope === "room" || contextMenu.scope === "category") &&
+            canManageChannels &&
+            (contextMenu.renameKind === "room" ||
+              (contextMenu.renameKind === "category" &&
+                contextMenu.renameId !== "default")) && (
+              <button
+                type="button"
+                className="sidebar-context-menu-item"
+                onClick={openDeleteFromContextMenu}
+              >
+                {contextMenu.renameKind === "category"
+                  ? "Delete category"
+                  : "Delete channel"}
+              </button>
+            )}
           {(contextMenu.scope === "server" || contextMenu.scope === "server-bar") && (
             <button
               type="button"
@@ -987,6 +1050,36 @@ export default function Sidebar({
                 className="profile-button"
               >
                 Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deleteTarget && (
+        <div className="create-modal-backdrop" onClick={closeDeleteModal}>
+          <div className="create-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="create-modal-title">
+              {deleteTarget.kind === "category" ? "Delete Category" : "Delete Channel"}
+            </div>
+            <p className="create-modal-subtitle">
+              This will permanently delete <strong>{deleteTarget.name}</strong>.
+            </p>
+            <div className="create-modal-actions">
+              <button
+                type="button"
+                onClick={closeDeleteModal}
+                className="profile-button secondary"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={submitDelete}
+                className="profile-button"
+                style={{ background: "var(--danger)" }}
+              >
+                Delete
               </button>
             </div>
           </div>
@@ -1431,13 +1524,26 @@ export default function Sidebar({
             </div>
           </div>
         </div>
-        <button
-          onClick={onSignOut}
-          className="sidebar-signout"
-          title="Sign out"
-        >
-          Sign out
-        </button>
+        <div style={{ display: "flex", gap: 8 }}>
+          {canManageRoles && (
+            <button
+              onClick={onOpenAccessManager}
+              className="sidebar-signout"
+              title="Manage roles and permissions"
+              style={{ flex: 1 }}
+            >
+              Access
+            </button>
+          )}
+          <button
+            onClick={onSignOut}
+            className="sidebar-signout"
+            title="Sign out"
+            style={{ flex: 1 }}
+          >
+            Sign out
+          </button>
+        </div>
       </div>
       </aside>
     </>

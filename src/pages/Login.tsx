@@ -5,6 +5,10 @@ import { setLiveKitUrl } from "../lib/livekit";
 
 interface ServerInfo {
   name: string;
+  description?: string;
+  iconUrl?: string;
+  bannerUrl?: string;
+  public?: boolean;
   registrationOpen: boolean;
   inviteOnly: boolean;
   livekitUrl?: string;
@@ -15,13 +19,14 @@ export default function Login() {
   const {
     token,
     loading,
+    user,
     signInWithPassword,
+    signInWithTwoFactor,
     signUp,
     serverUrl,
     setServerUrl,
     servers,
     switchServer,
-    saveServer,
     removeServer,
     signOutServer,
     getServerToken,
@@ -37,12 +42,14 @@ export default function Login() {
   const [localServerUrl, setLocalServerUrl] = useState(serverUrl);
   const [serverInfo, setServerInfo] = useState<ServerInfo | null>(null);
   const [fetchingInfo, setFetchingInfo] = useState(false);
+  const [twoFactorChallengeToken, setTwoFactorChallengeToken] = useState("");
+  const [twoFactorCode, setTwoFactorCode] = useState("");
 
   useEffect(() => {
-    if (token) {
+    if (token && user && !loading) {
       navigate("/");
     }
-  }, [token, navigate]);
+  }, [token, user, loading, navigate]);
 
   // Fetch server info when server URL changes
   const fetchServerInfo = useCallback(async (url: string) => {
@@ -53,11 +60,8 @@ export default function Login() {
       if (res.ok) {
         const data = await res.json();
         setServerInfo(data);
-        saveServer(url, data.name || undefined);
-        // Persist LiveKit URL so voice/video connects to the right server
-        if (data.livekitUrl) {
-          setLiveKitUrl(data.livekitUrl);
-        }
+        // Persist LiveKit URL per server so endpoints do not leak across servers.
+        setLiveKitUrl(typeof data.livekitUrl === "string" ? data.livekitUrl : "", url);
       } else {
         setServerInfo(null);
       }
@@ -76,6 +80,8 @@ export default function Login() {
 
   useEffect(() => {
     setLocalServerUrl(serverUrl);
+    setTwoFactorChallengeToken("");
+    setTwoFactorCode("");
   }, [serverUrl]);
 
   function handleServerUrlBlur() {
@@ -87,11 +93,9 @@ export default function Login() {
   }
 
   function handleSelectSavedServer(url: string) {
+    setError("");
     switchServer(url);
     fetchServerInfo(url);
-    if (getServerToken(url)) {
-      navigate("/");
-    }
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -112,7 +116,11 @@ export default function Login() {
 
     let result;
     if (mode === "login") {
-      result = await signInWithPassword(email, password);
+      if (twoFactorChallengeToken) {
+        result = await signInWithTwoFactor(twoFactorChallengeToken, twoFactorCode);
+      } else {
+        result = await signInWithPassword(email, password);
+      }
     } else {
       if (!username.trim()) {
         setError("Username is required");
@@ -129,6 +137,9 @@ export default function Login() {
 
     if (result.error) {
       setError(result.error);
+    } else if (mode === "login" && (result as any).requiresTwoFactor && (result as any).challengeToken) {
+      setTwoFactorChallengeToken((result as any).challengeToken);
+      setTwoFactorCode("");
     }
     setSubmitting(false);
   }
@@ -190,7 +201,7 @@ export default function Login() {
         {/* Logo & branding */}
         <div className="text-center mb-10">
           <div
-            className="inline-flex items-center justify-center w-14 h-14 mb-5 rounded-2xl"
+            className="inline-flex items-center justify-center w-14 h-14 mb-5 rounded-2xl overflow-hidden"
             style={{
               background:
                 "linear-gradient(135deg, rgba(124,106,255,0.2) 0%, rgba(139,92,246,0.1) 100%)",
@@ -198,31 +209,39 @@ export default function Login() {
               boxShadow: "0 0 40px rgba(124,106,255,0.1)",
             }}
           >
-            <svg
-              className="w-7 h-7"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="url(#icon-gradient)"
-              strokeWidth={1.5}
-            >
-              <defs>
-                <linearGradient
-                  id="icon-gradient"
-                  x1="0%"
-                  y1="0%"
-                  x2="100%"
-                  y2="100%"
-                >
-                  <stop offset="0%" stopColor="#a78bfa" />
-                  <stop offset="100%" stopColor="#7c6aff" />
-                </linearGradient>
-              </defs>
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M20.25 8.511c.884.284 1.5 1.128 1.5 2.097v4.286c0 1.136-.847 2.1-1.98 2.193-.34.027-.68.052-1.02.072v3.091l-3-3c-1.354 0-2.694-.055-4.02-.163a2.115 2.115 0 01-.825-.242m9.345-8.334a2.126 2.126 0 00-.476-.095 48.64 48.64 0 00-8.048 0c-1.131.094-1.976 1.057-1.976 2.192v4.286c0 .837.46 1.58 1.155 1.951m9.345-8.334V6.637c0-1.621-1.152-3.026-2.76-3.235A48.455 48.455 0 0011.25 3c-2.115 0-4.198.137-6.24.402-1.608.209-2.76 1.614-2.76 3.235v6.226c0 1.621 1.152 3.026 2.76 3.235.577.075 1.157.14 1.74.194V21l4.155-4.155"
+            {serverInfo?.iconUrl ? (
+              <img
+                src={serverInfo.iconUrl}
+                alt={serverInfo.name || "Server"}
+                style={{ width: "100%", height: "100%", objectFit: "cover" }}
               />
-            </svg>
+            ) : (
+              <svg
+                className="w-7 h-7"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="url(#icon-gradient)"
+                strokeWidth={1.5}
+              >
+                <defs>
+                  <linearGradient
+                    id="icon-gradient"
+                    x1="0%"
+                    y1="0%"
+                    x2="100%"
+                    y2="100%"
+                  >
+                    <stop offset="0%" stopColor="#a78bfa" />
+                    <stop offset="100%" stopColor="#7c6aff" />
+                  </linearGradient>
+                </defs>
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M20.25 8.511c.884.284 1.5 1.128 1.5 2.097v4.286c0 1.136-.847 2.1-1.98 2.193-.34.027-.68.052-1.02.072v3.091l-3-3c-1.354 0-2.694-.055-4.02-.163a2.115 2.115 0 01-.825-.242m9.345-8.334a2.126 2.126 0 00-.476-.095 48.64 48.64 0 00-8.048 0c-1.131.094-1.976 1.057-1.976 2.192v4.286c0 .837.46 1.58 1.155 1.951m9.345-8.334V6.637c0-1.621-1.152-3.026-2.76-3.235A48.455 48.455 0 0011.25 3c-2.115 0-4.198.137-6.24.402-1.608.209-2.76 1.614-2.76 3.235v6.226c0 1.621 1.152 3.026 2.76 3.235.577.075 1.157.14 1.74.194V21l4.155-4.155"
+                />
+              </svg>
+            )}
           </div>
           <h1 className="text-[28px] font-bold text-white tracking-tight">
             {mode === "login" ? "Welcome back" : "Create an account"}
@@ -239,8 +258,11 @@ export default function Login() {
           className="rounded-2xl"
           style={{
             padding: 28,
-            background:
-              "linear-gradient(180deg, rgba(22,22,34,0.9) 0%, rgba(15,15,23,0.95) 100%)",
+            background: serverInfo?.bannerUrl
+              ? `linear-gradient(180deg, rgba(22,22,34,0.88) 0%, rgba(15,15,23,0.96) 100%), url(${serverInfo.bannerUrl})`
+              : "linear-gradient(180deg, rgba(22,22,34,0.9) 0%, rgba(15,15,23,0.95) 100%)",
+            backgroundSize: "cover",
+            backgroundPosition: "center",
             border: "1px solid var(--border)",
             boxShadow:
               "0 25px 60px -12px rgba(0,0,0,0.5), 0 0 1px rgba(255,255,255,0.05) inset",
@@ -299,9 +321,12 @@ export default function Login() {
                   </p>
                 )}
                 {serverInfo && !fetchingInfo && (
-                  <p className="mt-1 text-[11px] text-(--accent)">
-                    {serverInfo.name}
-                  </p>
+                  <div className="mt-1">
+                    <p className="text-[11px] text-(--accent)">{serverInfo.name}</p>
+                    {serverInfo.description && (
+                      <p className="text-[11px] text-(--text-muted)">{serverInfo.description}</p>
+                    )}
+                  </div>
                 )}
               </div>
 
@@ -361,11 +386,34 @@ export default function Login() {
                   className="login-input"
                 />
               </div>
+              {mode === "login" && twoFactorChallengeToken && (
+                <div>
+                  <label className="block mb-1.5 text-[12px] font-medium text-(--text-secondary)">
+                    Authenticator Code
+                  </label>
+                  <input
+                    type="text"
+                    value={twoFactorCode}
+                    onChange={(e) => setTwoFactorCode(e.target.value)}
+                    placeholder="123456"
+                    className="login-input"
+                    inputMode="numeric"
+                  />
+                  <p className="mt-1 text-[11px] text-(--text-muted)">
+                    Enter the 6-digit code from your authenticator app.
+                  </p>
+                </div>
+              )}
             </div>
 
             <button
               type="submit"
-              disabled={submitting || !email || !password}
+              disabled={
+                submitting ||
+                !email ||
+                !password ||
+                (Boolean(twoFactorChallengeToken) && twoFactorCode.trim().length === 0)
+              }
               className="w-full h-11 rounded-lg text-[14px] font-semibold text-white cursor-pointer transition-all duration-200 active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed disabled:active:scale-100"
               style={{
                 marginTop: 24,
@@ -394,11 +442,24 @@ export default function Login() {
                   Please wait...
                 </span>
               ) : mode === "login" ? (
-                "Sign In"
+                twoFactorChallengeToken ? "Verify Code" : "Sign In"
               ) : (
                 "Create Account"
               )}
             </button>
+            {mode === "login" && twoFactorChallengeToken && (
+              <button
+                type="button"
+                onClick={() => {
+                  setTwoFactorChallengeToken("");
+                  setTwoFactorCode("");
+                  setError("");
+                }}
+                className="w-full mt-2 text-xs text-(--text-muted) hover:text-white transition-colors"
+              >
+                Back to password login
+              </button>
+            )}
           </form>
 
           {/* Toggle login/register */}
@@ -448,20 +509,21 @@ export default function Login() {
 
         {servers.length > 0 && (
           <div
-            className="rounded-2xl mt-4"
+            className="rounded-2xl mt-6"
             style={{
-              padding: 20,
+              padding: 22,
               background:
-                "linear-gradient(180deg, rgba(22,22,34,0.86) 0%, rgba(15,15,23,0.92) 100%)",
+                "linear-gradient(180deg, rgba(20,20,32,0.78) 0%, rgba(14,14,22,0.9) 100%)",
               border: "1px solid var(--border)",
-              boxShadow: "0 16px 32px -16px rgba(0,0,0,0.45)",
+              boxShadow: "0 20px 36px -18px rgba(0,0,0,0.52)",
+              backdropFilter: "blur(6px)",
             }}
           >
-            <h2 className="text-sm font-semibold text-white mb-2">Saved servers</h2>
-            <p className="text-[12px] text-(--text-muted) mb-3">
+            <h2 className="text-sm font-semibold text-white mb-2 tracking-wide">Saved Servers</h2>
+            <p className="text-[12px] text-(--text-muted) mb-4">
               Open directly when credentials are saved, or sign in again when logged out.
             </p>
-            <div className="grid gap-2">
+            <div className="grid gap-2.5">
               {servers.map((server) => {
                 const hasSavedLogin = Boolean(getServerToken(server.url));
                 return (

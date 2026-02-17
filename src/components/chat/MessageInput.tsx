@@ -10,6 +10,11 @@ interface MessageInputProps {
   placeholder?: string;
   onTypingChange?: (isTyping: boolean) => void;
   mentionUsernames?: string[];
+  replyTo?: {
+    username: string;
+    content: string;
+  } | null;
+  onCancelReply?: () => void;
 }
 
 type ActiveMention = {
@@ -42,6 +47,8 @@ export default function MessageInput({
   placeholder = "Type a message...",
   onTypingChange,
   mentionUsernames = [],
+  replyTo = null,
+  onCancelReply,
 }: MessageInputProps) {
   const [message, setMessage] = useState("");
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
@@ -253,6 +260,22 @@ export default function MessageInput({
 
   return (
     <div className="border-t border-[var(--border)] bg-[var(--bg-secondary)]/60 chat-input">
+      {replyTo && (
+        <div className="chat-reply-compose">
+          <div className="chat-reply-compose-meta">
+            <strong>Replying to {replyTo.username}</strong>
+            <span>{replyTo.content}</span>
+          </div>
+          <button
+            type="button"
+            className="chat-reply-compose-cancel"
+            onClick={onCancelReply}
+            title="Cancel reply"
+          >
+            <X size={12} />
+          </button>
+        </div>
+      )}
       {selectedFiles.length > 0 && (
         <div className="chat-attachments-staging">
           {selectedFiles.map((file) => (

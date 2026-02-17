@@ -15,10 +15,14 @@ import {
   Track,
   RoomEvent,
   ConnectionState,
+  LocalAudioTrack,
   RemoteAudioTrack,
+  LocalVideoTrack,
   VideoPresets,
   DefaultReconnectPolicy,
 } from "livekit-client";
+import { BackgroundProcessor, supportsBackgroundProcessors } from "@livekit/track-processors";
+import { LiveKitRnnoiseProcessor, supportsRnnoiseProcessing } from "../../lib/rnnoiseProcessor";
 import { Volume2 } from "lucide-react";
 import { useAuth } from "../../hooks/useAuth";
 import { fetchLiveKitToken, getLiveKitUrl, resolveResolution, clampResolution, clampFps } from "../../lib/livekit";
@@ -41,7 +45,12 @@ interface VoiceParticipant {
 function VoiceRoomContent({
   onLeave,
   pushToTalkEnabled,
+  pushToMuteEnabled,
   pushToTalkKey,
+  audioInputSensitivity,
+  noiseSuppressionMode,
+  videoBackgroundMode,
+  videoBackgroundImageUrl,
   preferredAudioInputId,
   preferredAudioOutputId,
   roomId,
@@ -51,7 +60,12 @@ function VoiceRoomContent({
 }: {
   onLeave: () => void;
   pushToTalkEnabled: boolean;
+  pushToMuteEnabled: boolean;
   pushToTalkKey: string;
+  audioInputSensitivity: number;
+  noiseSuppressionMode: "off" | "standard" | "aggressive" | "rnnoise";
+  videoBackgroundMode: "off" | "blur" | "image";
+  videoBackgroundImageUrl: string;
   preferredAudioInputId: string;
   preferredAudioOutputId: string;
   roomId: string;
@@ -76,12 +90,17 @@ function VoiceRoomContent({
   const [isConnected, setIsConnected] = useState(
     room.state === ConnectionState.Connected
   );
-  const [noiseSuppressionEnabled, setNoiseSuppressionEnabled] = useState(true);
+  const [noiseSuppressionEnabled, setNoiseSuppressionEnabled] = useState(
+    noiseSuppressionMode !== "off"
+  );
   const [audioInputDeviceId, setAudioInputDeviceId] = useState("");
   const [audioOutputDeviceId, setAudioOutputDeviceId] = useState("");
   const [participantVolumes, setParticipantVolumes] = useState<
     Record<string, number>
   >({});
+  const backgroundProcessorRef = useRef<ReturnType<typeof BackgroundProcessor> | null>(null);
+  const rnnoiseProcessorRef = useRef<LiveKitRnnoiseProcessor | null>(null);
+  const rnnoiseAudioContextRef = useRef<AudioContext | null>(null);
 
   const localIdentity = room.localParticipant.identity;
   const remoteParticipants = useMemo(
@@ -97,13 +116,27 @@ function VoiceRoomContent({
     return pushToTalkKey;
   }, [pushToTalkKey]);
 
+  useEffect(() => {
+    setNoiseSuppressionEnabled(noiseSuppressionMode !== "off");
+  }, [noiseSuppressionMode]);
+
+  const activeNoiseSuppressionMode = useMemo<"off" | "standard" | "aggressive" | "rnnoise">(
+    () => (noiseSuppressionEnabled ? noiseSuppressionMode === "off" ? "standard" : noiseSuppressionMode : "off"),
+    [noiseSuppressionEnabled, noiseSuppressionMode]
+  );
+
   const micCaptureOptions = useMemo(
     () => ({
-      noiseSuppression: noiseSuppressionEnabled,
-      echoCancellation: true,
-      autoGainControl: true,
+      noiseSuppression:
+        activeNoiseSuppressionMode === "standard" ||
+        activeNoiseSuppressionMode === "aggressive",
+      echoCancellation: activeNoiseSuppressionMode !== "rnnoise",
+      autoGainControl:
+        activeNoiseSuppressionMode === "aggressive" ||
+        activeNoiseSuppressionMode === "rnnoise",
+      channelCount: activeNoiseSuppressionMode === "aggressive" ? 1 : undefined,
     }),
-    [noiseSuppressionEnabled]
+    [activeNoiseSuppressionMode]
   );
 
   useEffect(() => {
@@ -134,6 +167,151 @@ function VoiceRoomContent({
       // Connection can drop while applying; ignore transient publish errors.
     });
   }, [room, pushToTalkEnabled, manualMute, deafened, micCaptureOptions]);
+
+  // Optional RNNoise processing on the published microphone track.
+  useEffect(() => {
+    if (!room || room.state !== ConnectionState.Connected) return;
+
+    async function applyAudioProcessor() {
+      const micPublication = room.localParticipant.getTrackPublication(Track.Source.Microphone);
+      const micTrack = micPublication?.track;
+      if (!(micTrack instanceof LocalAudioTrack)) return;
+
+      const wantsRnnoise =
+        activeNoiseSuppressionMode === "rnnoise" && supportsRnnoiseProcessing();
+
+      if (wantsRnnoise) {
+        try {
+          if (!rnnoiseAudioContextRef.current || rnnoiseAudioContextRef.current.state === "closed") {
+            rnnoiseAudioContextRef.current = new AudioContext();
+          }
+          const ctx = rnnoiseAudioContextRef.current;
+          micTrack.setAudioContext(ctx);
+          if (!rnnoiseProcessorRef.current) {
+            rnnoiseProcessorRef.current = new LiveKitRnnoiseProcessor();
+          }
+          await micTrack.setProcessor(rnnoiseProcessorRef.current as any);
+          return;
+        } catch {
+          // If RNNoise setup fails on this platform, continue with regular capture.
+        }
+      }
+
+      try {
+        await micTrack.stopProcessor();
+      } catch {
+        // No-op when no processor is attached.
+      }
+    }
+
+    void applyAudioProcessor();
+  }, [room, activeNoiseSuppressionMode]);
+
+  // Open-mic input sensitivity gate: auto-mute the mic when below the threshold.
+  useEffect(() => {
+    if (!room) return;
+    if (room.state !== ConnectionState.Connected) return;
+    if (pushToTalkEnabled || pushToMuteEnabled || manualMute || deafened) return;
+
+    let disposed = false;
+    let rafId: number | null = null;
+    let monitorStream: MediaStream | null = null;
+    let monitorAudioCtx: AudioContext | null = null;
+    let analyser: AnalyserNode | null = null;
+    let microphoneOpen = true;
+    let belowSince = 0;
+
+    // Sensitivity is stored as a 0-1 threshold; keep the practical gate window narrow.
+    const baseThreshold = Math.min(0.12, Math.max(0.004, audioInputSensitivity));
+    const openThreshold = baseThreshold * 1.2;
+    const closeThreshold = baseThreshold;
+    const closeDelayMs = 180;
+
+    async function setMicEnabled(nextEnabled: boolean) {
+      if (disposed || microphoneOpen === nextEnabled) return;
+      microphoneOpen = nextEnabled;
+      try {
+        if (nextEnabled) {
+          await room.localParticipant.setMicrophoneEnabled(true, micCaptureOptions);
+        } else {
+          await room.localParticipant.setMicrophoneEnabled(false);
+        }
+      } catch {
+        // Ignore transient failures during reconnect/device switch.
+      }
+    }
+
+    async function startMonitor() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: preferredAudioInputId
+            ? { deviceId: { ideal: preferredAudioInputId } }
+            : true,
+          video: false,
+        });
+        if (disposed) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+        monitorStream = stream;
+        monitorAudioCtx = new AudioContext();
+        const source = monitorAudioCtx.createMediaStreamSource(stream);
+        analyser = monitorAudioCtx.createAnalyser();
+        analyser.fftSize = 1024;
+        source.connect(analyser);
+        const data = new Uint8Array(analyser.fftSize);
+
+        const tick = (timestamp: number) => {
+          if (!analyser || disposed) return;
+          analyser.getByteTimeDomainData(data);
+          let sum = 0;
+          for (let i = 0; i < data.length; i += 1) {
+            const centered = (data[i] - 128) / 128;
+            sum += centered * centered;
+          }
+          const rms = Math.sqrt(sum / data.length);
+          if (rms >= openThreshold) {
+            belowSince = 0;
+            void setMicEnabled(true);
+          } else if (rms <= closeThreshold) {
+            if (!belowSince) belowSince = timestamp;
+            if (timestamp - belowSince >= closeDelayMs) {
+              void setMicEnabled(false);
+            }
+          }
+          rafId = window.requestAnimationFrame(tick);
+        };
+
+        rafId = window.requestAnimationFrame(tick);
+      } catch {
+        // If we cannot create a monitor stream, keep regular open mic behavior.
+      }
+    }
+
+    void startMonitor();
+
+    return () => {
+      disposed = true;
+      if (rafId !== null) {
+        window.cancelAnimationFrame(rafId);
+      }
+      if (monitorStream) {
+        monitorStream.getTracks().forEach((t) => t.stop());
+      }
+      if (monitorAudioCtx) {
+        void monitorAudioCtx.close();
+      }
+    };
+  }, [
+    room,
+    pushToTalkEnabled,
+    pushToMuteEnabled,
+    manualMute,
+    deafened,
+    audioInputSensitivity,
+    preferredAudioInputId,
+    micCaptureOptions,
+  ]);
 
   // Apply per-user volume (and deafen override) to all remote audio tracks.
   useEffect(() => {
@@ -222,9 +400,15 @@ function VoiceRoomContent({
     };
   }, [room, preferredAudioInputId, preferredAudioOutputId]);
 
-  // Push-to-talk keyboard handler
+  // Push-to-talk / push-to-mute keyboard handler
   useEffect(() => {
-    if (!room || !pushToTalkEnabled || room.state !== ConnectionState.Connected) return;
+    if (
+      !room ||
+      (!pushToTalkEnabled && !pushToMuteEnabled) ||
+      room.state !== ConnectionState.Connected
+    ) {
+      return;
+    }
 
     function isTypingTarget(target: EventTarget | null) {
       if (!target || !(target as HTMLElement).tagName) return false;
@@ -236,17 +420,29 @@ function VoiceRoomContent({
       if (deafened || manualMute) return;
       if (isTypingTarget(e.target)) return;
       if (e.code === pushToTalkKey || e.key === pushToTalkKey) {
-        room.localParticipant.setMicrophoneEnabled(true, micCaptureOptions).catch(() => {
-          // Ignore publish race while reconnecting.
-        });
+        if (pushToTalkEnabled) {
+          room.localParticipant.setMicrophoneEnabled(true, micCaptureOptions).catch(() => {
+            // Ignore publish race while reconnecting.
+          });
+        } else if (pushToMuteEnabled) {
+          room.localParticipant.setMicrophoneEnabled(false).catch(() => {
+            // Ignore publish race while reconnecting.
+          });
+        }
       }
     }
 
     function onKeyUp(e: KeyboardEvent) {
       if (e.code === pushToTalkKey || e.key === pushToTalkKey) {
-        room.localParticipant.setMicrophoneEnabled(false).catch(() => {
-          // Ignore publish race while reconnecting.
-        });
+        if (pushToTalkEnabled) {
+          room.localParticipant.setMicrophoneEnabled(false).catch(() => {
+            // Ignore publish race while reconnecting.
+          });
+        } else if (pushToMuteEnabled && !manualMute && !deafened) {
+          room.localParticipant.setMicrophoneEnabled(true, micCaptureOptions).catch(() => {
+            // Ignore publish race while reconnecting.
+          });
+        }
       }
     }
 
@@ -259,6 +455,7 @@ function VoiceRoomContent({
   }, [
     room,
     pushToTalkEnabled,
+    pushToMuteEnabled,
     pushToTalkKey,
     manualMute,
     deafened,
@@ -346,6 +543,56 @@ function VoiceRoomContent({
     }
   }, [room, isCameraEnabled]);
 
+  const applyVideoBackgroundEffect = useCallback(async () => {
+    if (room.state !== ConnectionState.Connected) return;
+    const cameraPublication = room.localParticipant.getTrackPublication(Track.Source.Camera);
+    const cameraTrack = cameraPublication?.track;
+    if (!(cameraTrack instanceof LocalVideoTrack)) return;
+    if (!supportsBackgroundProcessors()) return;
+
+    if (!backgroundProcessorRef.current) {
+      const processor = BackgroundProcessor({ mode: "disabled" });
+      await cameraTrack.setProcessor(processor);
+      backgroundProcessorRef.current = processor;
+    }
+
+    const processor = backgroundProcessorRef.current;
+    if (!processor) return;
+    if (videoBackgroundMode === "blur") {
+      await processor.switchTo({ mode: "background-blur", blurRadius: 12 });
+      return;
+    }
+    if (videoBackgroundMode === "image" && videoBackgroundImageUrl.trim()) {
+      await processor.switchTo({
+        mode: "virtual-background",
+        imagePath: videoBackgroundImageUrl.trim(),
+      });
+      return;
+    }
+    await processor.switchTo({ mode: "disabled" });
+  }, [room, videoBackgroundMode, videoBackgroundImageUrl]);
+
+  useEffect(() => {
+    if (!isCameraEnabled) return;
+    void applyVideoBackgroundEffect().catch(() => {
+      // Keep camera published even if background processing is not supported.
+    });
+  }, [isCameraEnabled, applyVideoBackgroundEffect]);
+
+  useEffect(() => {
+    return () => {
+      backgroundProcessorRef.current = null;
+      if (rnnoiseProcessorRef.current) {
+        void rnnoiseProcessorRef.current.destroy();
+      }
+      rnnoiseProcessorRef.current = null;
+      if (rnnoiseAudioContextRef.current) {
+        void rnnoiseAudioContextRef.current.close();
+      }
+      rnnoiseAudioContextRef.current = null;
+    };
+  }, []);
+
   const toggleDeafen = useCallback(() => {
     setDeafened((prev) => {
       if (prev) playUndeafen();
@@ -355,8 +602,11 @@ function VoiceRoomContent({
   }, []);
 
   const toggleNoiseSuppression = useCallback(() => {
-    setNoiseSuppressionEnabled((prev) => !prev);
-  }, []);
+    setNoiseSuppressionEnabled((prev) => {
+      if (prev) return false;
+      return noiseSuppressionMode !== "off";
+    });
+  }, [noiseSuppressionMode]);
 
   const startScreenShare = useCallback(async (resolution: string, fps: number) => {
     if (room.state !== ConnectionState.Connected) {
@@ -624,6 +874,9 @@ function VoiceRoomContent({
       {pushToTalkEnabled && (
         <div className="voice-ptt">Hold {formattedKey} to talk</div>
       )}
+      {pushToMuteEnabled && !pushToTalkEnabled && (
+        <div className="voice-ptt">Hold {formattedKey} to mute</div>
+      )}
     </div>
   );
 }
@@ -815,7 +1068,12 @@ export default function VoiceChannel({
             <VoiceRoomContent
               onLeave={handleLeave}
               pushToTalkEnabled={profile.pushToTalkEnabled}
+              pushToMuteEnabled={profile.pushToMuteEnabled}
               pushToTalkKey={profile.pushToTalkKey}
+              audioInputSensitivity={profile.audioInputSensitivity}
+              noiseSuppressionMode={profile.noiseSuppressionMode}
+              videoBackgroundMode={profile.videoBackgroundMode}
+              videoBackgroundImageUrl={profile.videoBackgroundImageUrl}
               preferredAudioInputId={profile.audioInputId}
               preferredAudioOutputId={profile.audioOutputId}
               roomId={room.id}

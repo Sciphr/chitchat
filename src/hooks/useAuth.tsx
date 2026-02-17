@@ -18,6 +18,20 @@ interface UserInfo {
   id: string;
   email: string;
   isAdmin: boolean;
+  permissions: {
+    canManageChannels: boolean;
+    canManageRoles: boolean;
+    canManageServer: boolean;
+    canKickMembers: boolean;
+    canBanMembers: boolean;
+    canTimeoutMembers: boolean;
+    canModerateVoice: boolean;
+    canPinMessages: boolean;
+    canManageMessages: boolean;
+    canUploadFiles: boolean;
+    canUseEmojis: boolean;
+    canStartVoice: boolean;
+  };
 }
 
 interface Profile {
@@ -26,10 +40,16 @@ interface Profile {
   avatarUrl: string;
   about: string;
   pushToTalkEnabled: boolean;
+  pushToMuteEnabled: boolean;
   pushToTalkKey: string;
+  audioInputSensitivity: number;
+  noiseSuppressionMode: "off" | "standard" | "aggressive" | "rnnoise";
   audioInputId: string;
   audioOutputId: string;
   videoInputId: string;
+  videoBackgroundMode: "off" | "blur" | "image";
+  videoBackgroundImageUrl: string;
+  twoFactorEnabled: boolean;
 }
 
 interface AuthContext {
@@ -49,6 +69,10 @@ interface AuthContext {
   signInWithPassword: (
     email: string,
     password: string
+  ) => Promise<{ error: string | null; requiresTwoFactor?: boolean; challengeToken?: string }>;
+  signInWithTwoFactor: (
+    challengeToken: string,
+    code: string
   ) => Promise<{ error: string | null }>;
   signUp: (
     email: string,
@@ -66,10 +90,16 @@ const DEFAULT_PROFILE: Profile = {
   avatarUrl: "",
   about: "",
   pushToTalkEnabled: false,
+  pushToMuteEnabled: false,
   pushToTalkKey: "Space",
+  audioInputSensitivity: 0.02,
+  noiseSuppressionMode: "standard",
   audioInputId: "",
   audioOutputId: "",
   videoInputId: "",
+  videoBackgroundMode: "off",
+  videoBackgroundImageUrl: "",
+  twoFactorEnabled: false,
 };
 
 export interface SavedServer {
@@ -83,6 +113,24 @@ const TOKENS_BY_SERVER_STORAGE_KEY = "chitchat_tokens_by_server";
 
 const AuthContext = createContext<AuthContext | null>(null);
 
+function mapPermissions(data: Record<string, any>) {
+  const source = (data.permissions as Record<string, any> | undefined) || {};
+  return {
+    canManageChannels: Boolean(source.canManageChannels),
+    canManageRoles: Boolean(source.canManageRoles),
+    canManageServer: Boolean(source.canManageServer),
+    canKickMembers: Boolean(source.canKickMembers),
+    canBanMembers: Boolean(source.canBanMembers),
+    canTimeoutMembers: Boolean(source.canTimeoutMembers),
+    canModerateVoice: Boolean(source.canModerateVoice),
+    canPinMessages: Boolean(source.canPinMessages),
+    canManageMessages: Boolean(source.canManageMessages),
+    canUploadFiles: source.canUploadFiles !== false,
+    canUseEmojis: source.canUseEmojis !== false,
+    canStartVoice: source.canStartVoice !== false,
+  };
+}
+
 function mapServerProfile(data: Record<string, any>): Profile {
   return {
     username: data.username || "Anonymous",
@@ -90,10 +138,27 @@ function mapServerProfile(data: Record<string, any>): Profile {
     avatarUrl: data.avatar_url || "",
     about: data.about || "",
     pushToTalkEnabled: Boolean(data.push_to_talk_enabled),
+    pushToMuteEnabled: Boolean(data.push_to_mute_enabled),
     pushToTalkKey: data.push_to_talk_key || "Space",
+    audioInputSensitivity:
+      typeof data.audio_input_sensitivity === "number"
+        ? Math.min(Math.max(data.audio_input_sensitivity, 0), 1)
+        : 0.02,
+    noiseSuppressionMode:
+      data.noise_suppression_mode === "off" ||
+      data.noise_suppression_mode === "aggressive" ||
+      data.noise_suppression_mode === "rnnoise"
+        ? data.noise_suppression_mode
+        : "standard",
     audioInputId: data.audio_input_id || "",
     audioOutputId: data.audio_output_id || "",
     videoInputId: data.video_input_id || "",
+    videoBackgroundMode:
+      data.video_background_mode === "blur" || data.video_background_mode === "image"
+        ? data.video_background_mode
+        : "off",
+    videoBackgroundImageUrl: data.video_background_image_url || "",
+    twoFactorEnabled: Boolean(data.two_factor_enabled),
   };
 }
 
@@ -224,18 +289,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     writeTokensByServer(next);
   }
 
-  function switchToServer(url: string, nameHint?: string) {
+  function switchToServer(url: string, nameHint?: string, persist = true) {
     const normalized = normalizeServerUrl(url);
     if (!normalized) return;
-    upsertServer(normalized, nameHint);
+    if (persist) {
+      upsertServer(normalized, nameHint);
+    }
+    const nextToken = tokensByServer[normalized] || null;
+    const sameServer = normalized === serverUrl;
+    const sameToken = nextToken === token;
+    if (sameServer && sameToken) {
+      // No auth context change; avoid forcing loading=true and getting stuck.
+      return;
+    }
     _setServerUrl(normalized);
     setServerUrlState(normalized);
-    const nextToken = tokensByServer[normalized] || null;
     setToken(nextToken);
     setTokenState(nextToken);
     setUser(null);
     setProfile(DEFAULT_PROFILE);
-    setLoading(true);
+    setLoading(Boolean(nextToken));
     resetSocket();
   }
 
@@ -249,13 +322,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     setLoading(true);
-    apiFetch("/api/auth/me")
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    apiFetch("/api/auth/me", { signal: controller.signal })
       .then((res) => {
         if (!res.ok) throw new Error("Invalid token");
         return res.json();
       })
       .then((data) => {
-        setUser({ id: data.id, email: data.email, isAdmin: data.isAdmin || false });
+        setUser({
+          id: data.id,
+          email: data.email,
+          isAdmin: data.isAdmin || false,
+          permissions: mapPermissions(data),
+        });
         setProfile(mapServerProfile(data));
       })
       .catch(() => {
@@ -267,7 +347,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setUser(null);
         setProfile(DEFAULT_PROFILE);
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        clearTimeout(timeout);
+        setLoading(false);
+      });
   }, [serverUrl, token, tokensByServer]);
 
   async function signInWithPassword(email: string, password: string) {
@@ -282,14 +365,64 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return { error: data.error || "Login failed" };
       }
 
+      if (data.requiresTwoFactor && data.challengeToken) {
+        return {
+          error: null,
+          requiresTwoFactor: true,
+          challengeToken: data.challengeToken,
+        };
+      }
+
       const nextTokens = { ...tokensByServer, [serverUrl]: data.token };
       setTokens(nextTokens);
       setToken(data.token);
       setTokenState(data.token);
-      setUser({ id: data.user.id, email: data.user.email, isAdmin: data.user.isAdmin || false });
+      setUser({
+        id: data.user.id,
+        email: data.user.email,
+        isAdmin: data.user.isAdmin || false,
+        permissions: mapPermissions(data.user),
+      });
       upsertServer(serverUrl);
 
       // Fetch full profile
+      const profileRes = await apiFetch("/api/auth/me");
+      if (profileRes.ok) {
+        const profileData = await profileRes.json();
+        setProfile(mapServerProfile(profileData));
+      }
+
+      return { error: null };
+    } catch (err) {
+      return {
+        error: err instanceof Error ? err.message : "Connection failed",
+      };
+    }
+  }
+
+  async function signInWithTwoFactor(challengeToken: string, code: string) {
+    try {
+      const res = await apiFetch("/api/auth/login/2fa", {
+        method: "POST",
+        body: JSON.stringify({ challengeToken, code }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        return { error: data.error || "2FA verification failed" };
+      }
+
+      const nextTokens = { ...tokensByServer, [serverUrl]: data.token };
+      setTokens(nextTokens);
+      setToken(data.token);
+      setTokenState(data.token);
+      setUser({
+        id: data.user.id,
+        email: data.user.email,
+        isAdmin: data.user.isAdmin || false,
+        permissions: mapPermissions(data.user),
+      });
+      upsertServer(serverUrl);
+
       const profileRes = await apiFetch("/api/auth/me");
       if (profileRes.ok) {
         const profileData = await profileRes.json();
@@ -320,7 +453,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setTokens(nextTokens);
       setToken(data.token);
       setTokenState(data.token);
-      setUser({ id: data.user.id, email: data.user.email, isAdmin: data.user.isAdmin || false });
+      setUser({
+        id: data.user.id,
+        email: data.user.email,
+        isAdmin: data.user.isAdmin || false,
+        permissions: mapPermissions(data.user),
+      });
       upsertServer(serverUrl);
       setProfile({
         ...DEFAULT_PROFILE,
@@ -349,10 +487,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           avatar_url: update.avatarUrl.trim(),
           about: update.about.trim(),
           push_to_talk_enabled: update.pushToTalkEnabled ? 1 : 0,
+          push_to_mute_enabled: update.pushToMuteEnabled ? 1 : 0,
           push_to_talk_key: update.pushToTalkKey.trim() || "Space",
+          audio_input_sensitivity: Math.min(
+            Math.max(update.audioInputSensitivity, 0),
+            1
+          ),
+          noise_suppression_mode: update.noiseSuppressionMode,
           audio_input_id: update.audioInputId || null,
           audio_output_id: update.audioOutputId || null,
           video_input_id: update.videoInputId || null,
+          video_background_mode: update.videoBackgroundMode,
+          video_background_image_url: update.videoBackgroundImageUrl.trim() || null,
         }),
       });
 
@@ -371,9 +517,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   async function signOut() {
-    const nextTokens = { ...tokensByServer };
-    delete nextTokens[serverUrl];
-    setTokens(nextTokens);
+    // Sign out of the active in-memory session but keep saved server tokens.
+    // Use signOutServer(url) when the user explicitly wants to remove saved login.
     setToken(null);
     setTokenState(null);
     setUser(null);
@@ -383,7 +528,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   function handleSetServerUrl(url: string, nameHint?: string) {
-    switchToServer(url, nameHint);
+    switchToServer(url, nameHint, false);
   }
 
   function saveServer(url: string, nameHint?: string) {
@@ -462,6 +607,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         signOutServer,
         getServerToken,
         signInWithPassword,
+        signInWithTwoFactor,
         signUp,
         updateProfile: updateProfileFn,
         signOut,

@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import EmojiPicker, { type EmojiClickData, Theme } from "emoji-picker-react";
 import {
@@ -6,9 +6,11 @@ import {
   AtSign,
   Bell,
   BellOff,
+  CornerUpLeft,
   Download,
   ImageIcon,
   MessageSquare,
+  Search,
   SmilePlus,
 } from "lucide-react";
 import type { Message, MessageAttachment, MessageReaction, Room } from "../../types";
@@ -24,6 +26,9 @@ interface ChatRoomProps {
   currentUsername: string;
   currentAvatarUrl: string;
   isAdmin: boolean;
+  canManageMessages: boolean;
+  canPinMessages: boolean;
+  canUseEmojis: boolean;
   unreadCount?: number;
   firstUnreadAt?: string;
   onMarkRead?: (roomId: string) => void;
@@ -324,6 +329,9 @@ export default function ChatRoom({
   currentUsername,
   currentAvatarUrl,
   isAdmin,
+  canManageMessages,
+  canPinMessages,
+  canUseEmojis,
   unreadCount = 0,
   firstUnreadAt,
   onMarkRead,
@@ -337,6 +345,11 @@ export default function ChatRoom({
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [typingUsers, setTypingUsers] = useState<Record<string, string>>({});
+  const [replyTo, setReplyTo] = useState<Message | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searching, setSearching] = useState(false);
+  const [searchResults, setSearchResults] = useState<Message[]>([]);
   const [mediaPreview, setMediaPreview] = useState<{
     kind: "image" | "video";
     src: string;
@@ -349,9 +362,18 @@ export default function ChatRoom({
   const typingActiveRef = useRef(false);
   const typingStopTimerRef = useRef<number | null>(null);
   const notificationMenuRef = useRef<HTMLDivElement | null>(null);
+  const searchPanelRef = useRef<HTMLDivElement | null>(null);
+  const messageContextMenuRef = useRef<HTMLDivElement | null>(null);
+  const messageItemRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const reactionPickerRef = useRef<HTMLDivElement | null>(null);
   const [notificationMenuOpen, setNotificationMenuOpen] = useState(false);
   const [reactionPickerMessageId, setReactionPickerMessageId] = useState<string | null>(null);
+  const [pinnedByMessageId, setPinnedByMessageId] = useState<Record<string, boolean>>({});
+  const [messageContextMenu, setMessageContextMenu] = useState<{
+    x: number;
+    y: number;
+    messageId: string;
+  } | null>(null);
 
   const firstUnreadIndex = useMemo(() => {
     if (!firstUnreadAt || unreadCount <= 0) return -1;
@@ -360,6 +382,10 @@ export default function ChatRoom({
       (msg) => new Date(msg.created_at).getTime() >= markerTime,
     );
   }, [messages, firstUnreadAt, unreadCount]);
+  const contextMenuMessage = useMemo(() => {
+    if (!messageContextMenu) return null;
+    return messages.find((msg) => msg.id === messageContextMenu.messageId) || null;
+  }, [messageContextMenu, messages]);
 
   // Auto-scroll to bottom on new messages (only when already near bottom)
   useEffect(() => {
@@ -394,6 +420,11 @@ export default function ChatRoom({
     function onHistory({ messages: history, hasMore: more }: { messages: Message[]; hasMore: boolean }) {
       shouldScrollRef.current = true;
       setMessages(history);
+      const nextPinned: Record<string, boolean> = {};
+      for (const msg of history as Array<Message & { pinned?: unknown }>) {
+        if ((msg as any).pinned) nextPinned[msg.id] = true;
+      }
+      setPinnedByMessageId(nextPinned);
       setHasMore(more);
     }
 
@@ -418,6 +449,16 @@ export default function ChatRoom({
             : msg
         )
       );
+    }
+
+    function onPinnedUpdate({
+      messageId,
+      pinned,
+    }: {
+      messageId: string;
+      pinned: boolean;
+    }) {
+      setPinnedByMessageId((prev) => ({ ...prev, [messageId]: Boolean(pinned) }));
     }
 
     function onSystemMessage({ content }: { content: string }) {
@@ -467,9 +508,20 @@ export default function ChatRoom({
     socket.on("message:history", onHistory);
     socket.on("message:deleted", onDeleted);
     socket.on("message:reaction:update", onReactionUpdate);
+    socket.on("message:pinned:update", onPinnedUpdate);
     socket.on("message:system", onSystemMessage);
     socket.on("typing:start", onTypingStart);
     socket.on("typing:stop", onTypingStop);
+    socket.emit(
+      "message:pins:get",
+      { roomId: room.id },
+      (ack?: { ok: boolean; messageIds?: string[] }) => {
+        if (!ack?.ok || !Array.isArray(ack.messageIds)) return;
+        const next: Record<string, boolean> = {};
+        for (const id of ack.messageIds) next[id] = true;
+        setPinnedByMessageId(next);
+      }
+    );
 
     return () => {
       if (typingActiveRef.current) {
@@ -486,10 +538,12 @@ export default function ChatRoom({
       socket.off("message:history", onHistory);
       socket.off("message:deleted", onDeleted);
       socket.off("message:reaction:update", onReactionUpdate);
+      socket.off("message:pinned:update", onPinnedUpdate);
       socket.off("message:system", onSystemMessage);
       socket.off("typing:start", onTypingStart);
       socket.off("typing:stop", onTypingStop);
       setMessages([]);
+      setPinnedByMessageId({});
       setHasMore(false);
     };
   }, [room.id, isConnected, socket, currentUserId]);
@@ -561,6 +615,10 @@ export default function ChatRoom({
         user_id: currentUserId,
         username: currentUsername,
         avatar_url: currentAvatarUrl || undefined,
+        reply_to_message_id: replyTo?.id || null,
+        reply_to_id: replyTo?.id || null,
+        reply_to_username: replyTo?.username || null,
+        reply_to_content: replyTo?.content || null,
         content,
         attachments,
         created_at: new Date().toISOString(),
@@ -578,6 +636,7 @@ export default function ChatRoom({
         content,
         client_nonce: nonce,
         attachment_ids: attachments.map((attachment) => attachment.id),
+        reply_to_message_id: replyTo?.id || null,
       },
       (ack?: { ok: boolean; error?: string; message?: Message }) => {
         if (!ack || !ack.ok || !ack.message) {
@@ -609,8 +668,37 @@ export default function ChatRoom({
           next[index] = confirmed;
           return next;
         });
+        setReplyTo(null);
       },
     );
+  }
+
+  function runSearch() {
+    const query = searchQuery.trim();
+    if (query.length < 2) {
+      setSearchResults([]);
+      return;
+    }
+    setSearching(true);
+    socket.emit(
+      "message:search",
+      { roomId: room.id, query, limit: 40 },
+      (ack?: { ok: boolean; error?: string; messages?: Message[] }) => {
+        setSearching(false);
+        if (!ack?.ok) {
+          setSendError(ack?.error || "Search failed.");
+          return;
+        }
+        setSearchResults(ack.messages || []);
+      }
+    );
+  }
+
+  function jumpToMessage(messageId: string) {
+    setSearchOpen(false);
+    const target = messageItemRefs.current[messageId];
+    if (!target) return;
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
   }
 
   function handleDelete(msg: Message) {
@@ -714,8 +802,26 @@ export default function ChatRoom({
   }
 
   function addReactionFromPicker(messageId: string, value: EmojiClickData) {
+    if (!canUseEmojis) return;
     setReaction(messageId, value.emoji, true);
     setReactionPickerMessageId(null);
+  }
+
+  function canDeleteMessage(msg: Message) {
+    const isOwnMessage = Boolean(currentUserId && msg.user_id === currentUserId);
+    const pending = Boolean(msg.pending);
+    const failed = Boolean(msg.failed);
+    return (
+      !pending &&
+      !failed &&
+      !msg.id.startsWith("temp-") &&
+      (isOwnMessage || isAdmin || canManageMessages)
+    );
+  }
+
+  function canPinMessage(msg: Message) {
+    if (!msg || msg.id.startsWith("temp-")) return false;
+    return isAdmin || canPinMessages;
   }
 
   const typingNames = Object.values(typingUsers);
@@ -756,6 +862,68 @@ export default function ChatRoom({
     return () => window.removeEventListener("mousedown", onDocumentClick);
   }, [reactionPickerMessageId]);
 
+  useLayoutEffect(() => {
+    if (!messageContextMenu || !messageContextMenuRef.current) return;
+    const rect = messageContextMenuRef.current.getBoundingClientRect();
+    const margin = 8;
+    const maxX = window.innerWidth - margin;
+    const maxY = window.innerHeight - margin;
+    let nextX = messageContextMenu.x;
+    let nextY = messageContextMenu.y;
+    if (rect.right > maxX) nextX -= rect.right - maxX;
+    if (rect.bottom > maxY) nextY -= rect.bottom - maxY;
+    if (rect.left < margin) nextX += margin - rect.left;
+    if (rect.top < margin) nextY += margin - rect.top;
+    if (nextX !== messageContextMenu.x || nextY !== messageContextMenu.y) {
+      setMessageContextMenu((prev) =>
+        prev ? { ...prev, x: nextX, y: nextY } : prev
+      );
+    }
+  }, [messageContextMenu]);
+
+  useEffect(() => {
+    if (!messageContextMenu) return;
+    function onDocumentClick(event: MouseEvent) {
+      if (
+        messageContextMenuRef.current &&
+        !messageContextMenuRef.current.contains(event.target as Node)
+      ) {
+        setMessageContextMenu(null);
+      }
+    }
+    function onEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setMessageContextMenu(null);
+    }
+    window.addEventListener("mousedown", onDocumentClick);
+    window.addEventListener("keydown", onEscape);
+    return () => {
+      window.removeEventListener("mousedown", onDocumentClick);
+      window.removeEventListener("keydown", onEscape);
+    };
+  }, [messageContextMenu]);
+
+  useEffect(() => {
+    setReplyTo(null);
+    setSearchQuery("");
+    setSearchResults([]);
+    setSearchOpen(false);
+    setMessageContextMenu(null);
+  }, [room.id]);
+
+  useEffect(() => {
+    if (!searchOpen) return;
+    function onDocumentClick(event: MouseEvent) {
+      if (
+        searchPanelRef.current &&
+        !searchPanelRef.current.contains(event.target as Node)
+      ) {
+        setSearchOpen(false);
+      }
+    }
+    window.addEventListener("mousedown", onDocumentClick);
+    return () => window.removeEventListener("mousedown", onDocumentClick);
+  }, [searchOpen]);
+
   const notificationLabel =
     notificationMode === "mute"
       ? "Muted"
@@ -785,6 +953,63 @@ export default function ChatRoom({
           </>
         )}
         <div className="room-header-actions">
+          <div className="room-header-search" ref={searchPanelRef}>
+            <button
+              type="button"
+              className={`room-header-notify ${searchOpen ? "active" : ""}`}
+              onClick={() => setSearchOpen((prev) => !prev)}
+              title="Search messages"
+            >
+              <Search size={14} />
+              <span>Search</span>
+            </button>
+            {searchOpen && (
+              <div className="room-header-search-panel">
+                <div className="room-header-search-row">
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        runSearch();
+                      }
+                    }}
+                    placeholder="Search this channel..."
+                  />
+                  <button type="button" onClick={runSearch} disabled={searching}>
+                    {searching ? "..." : "Go"}
+                  </button>
+                </div>
+                <div className="room-header-search-results">
+                  {searchResults.length === 0 ? (
+                    <div className="room-header-search-empty">
+                      {searchQuery.trim().length < 2
+                        ? "Type at least 2 characters"
+                        : "No matches"}
+                    </div>
+                  ) : (
+                    searchResults.map((result) => (
+                      <button
+                        key={result.id}
+                        type="button"
+                        className="room-header-search-result"
+                        onClick={() => jumpToMessage(result.id)}
+                      >
+                        <strong>{result.username}</strong>
+                        <span>
+                          {result.content.length > 80
+                            ? `${result.content.slice(0, 80)}...`
+                            : result.content}
+                        </span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
           <div className="room-header-notifications" ref={notificationMenuRef}>
             <button
               type="button"
@@ -874,7 +1099,12 @@ export default function ChatRoom({
           const pending = Boolean(msg.pending);
           const failed = Boolean(msg.failed);
           const canRetry = failed && isOwnMessage;
-          const canDelete = !pending && !failed && !msg.id.startsWith("temp-") && (isOwnMessage || isAdmin);
+          const canDelete =
+            !pending &&
+            !failed &&
+            !msg.id.startsWith("temp-") &&
+            (isOwnMessage || isAdmin || canManageMessages);
+          const isPinned = Boolean(pinnedByMessageId[msg.id]);
           const youtubeEmbedUrl = getFirstYouTubeEmbedUrl(msg.content);
 
           return (
@@ -885,6 +1115,17 @@ export default function ChatRoom({
                 </div>
               )}
               <motion.div
+                ref={(element) => {
+                  messageItemRefs.current[msg.id] = element;
+                }}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  setMessageContextMenu({
+                    x: event.clientX,
+                    y: event.clientY,
+                    messageId: msg.id,
+                  });
+                }}
                 initial={{ opacity: 0, y: 6 }}
                 animate={{ opacity: pending ? 0.7 : 1, y: 0 }}
                 exit={{ opacity: 0, x: -30, height: 0, marginTop: 0, marginBottom: 0, paddingTop: 0, paddingBottom: 0 }}
@@ -907,8 +1148,23 @@ export default function ChatRoom({
                   )}
                 </div>
                 <div className="min-w-0 flex-1 chat-message-content">
+                  {msg.reply_to_id && (
+                    <div className="chat-reply-preview">
+                      <strong>{msg.reply_to_username || "Unknown"}</strong>
+                      <span>
+                        {msg.reply_to_content
+                          ? msg.reply_to_content.length > 90
+                            ? `${msg.reply_to_content.slice(0, 90)}...`
+                            : msg.reply_to_content
+                          : "Original message unavailable"}
+                      </span>
+                    </div>
+                  )}
                   <div className="flex items-baseline gap-2">
-                    <span className="font-semibold text-sm">
+                    <span
+                      className="font-semibold text-sm"
+                      style={msg.role_color ? { color: msg.role_color } : undefined}
+                    >
                       {displayName}
                     </span>
                     {isOwnMessage && (
@@ -927,6 +1183,9 @@ export default function ChatRoom({
                     <span className="text-xs text-[var(--text-muted)]">
                       {new Date(msg.created_at).toLocaleTimeString()}
                     </span>
+                    {isPinned && (
+                      <span className="text-xs text-[var(--text-muted)]">Pinned</span>
+                    )}
                   </div>
                   <p className="text-sm text-[var(--text-secondary)] break-words leading-relaxed">
                     {renderMessageWithMentions(msg.content, currentUsername)}
@@ -961,7 +1220,11 @@ export default function ChatRoom({
                           className={`chat-reaction-chip ${
                             hasCurrentUserReacted(reaction) ? "active" : ""
                           }`}
-                          onClick={() => toggleReaction(msg.id, reaction)}
+                          disabled={!canUseEmojis}
+                          onClick={() => {
+                            if (!canUseEmojis) return;
+                            toggleReaction(msg.id, reaction);
+                          }}
                           title={reaction.user_ids?.length ? `${reaction.user_ids.length} reactions` : "React"}
                         >
                           <span>{reaction.emoji}</span>
@@ -975,10 +1238,21 @@ export default function ChatRoom({
                       reactionPickerMessageId === msg.id ? "open" : ""
                     }`}
                   >
+                    {!msg.id.startsWith("temp-") && (
+                      <button
+                        type="button"
+                        className="chat-reaction-add"
+                        title="Reply"
+                        onClick={() => setReplyTo(msg)}
+                      >
+                        <CornerUpLeft size={13} />
+                      </button>
+                    )}
                     <button
                       type="button"
                       className="chat-reaction-add"
                       title="Add reaction"
+                      disabled={!canUseEmojis}
                       onClick={() =>
                         setReactionPickerMessageId((prev) =>
                           prev === msg.id ? null : msg.id
@@ -1040,12 +1314,81 @@ export default function ChatRoom({
         onSend={(content, attachments) => handleSend(content, attachments || [])}
         onTypingChange={handleTypingChange}
         mentionUsernames={mentionableUsernames}
+        replyTo={
+          replyTo
+            ? {
+                username: replyTo.username,
+                content: replyTo.content,
+              }
+            : null
+        }
+        onCancelReply={() => setReplyTo(null)}
         disabled={!isConnected}
         placeholder={room.type === "dm" ? `Message @${room.other_username || "user"}` : `Message #${room.name}`}
       />
       {sendError && (
         <div className="px-10 pb-4 text-xs text-[var(--danger)]">
           {sendError}
+        </div>
+      )}
+      {messageContextMenu && contextMenuMessage && (
+        <div
+          ref={messageContextMenuRef}
+          className="chat-message-context-menu"
+          style={{ top: messageContextMenu.y, left: messageContextMenu.x }}
+        >
+          <button
+            type="button"
+            className="chat-message-context-item"
+            onClick={() => {
+              setReplyTo(contextMenuMessage);
+              setMessageContextMenu(null);
+            }}
+          >
+            Reply
+          </button>
+          <button
+            type="button"
+            className="chat-message-context-item"
+            disabled={!canUseEmojis}
+            onClick={() => {
+              setReactionPickerMessageId(contextMenuMessage.id);
+              setMessageContextMenu(null);
+            }}
+          >
+            React
+          </button>
+          {canPinMessage(contextMenuMessage) && (
+            <button
+              type="button"
+              className="chat-message-context-item"
+              onClick={() => {
+                socket.emit(
+                  "message:pin:set",
+                  {
+                    messageId: contextMenuMessage.id,
+                    active: !pinnedByMessageId[contextMenuMessage.id],
+                  },
+                  () => undefined
+                );
+                setMessageContextMenu(null);
+              }}
+            >
+              {pinnedByMessageId[contextMenuMessage.id] ? "Unpin" : "Pin"}
+            </button>
+          )}
+          {canDeleteMessage(contextMenuMessage) && (
+            <button
+              type="button"
+              className="chat-message-context-item danger"
+              onClick={() => {
+                handleDelete(contextMenuMessage);
+                setMessageContextMenu(null);
+              }}
+            >
+              Delete
+            </button>
+          )}
         </div>
       )}
 

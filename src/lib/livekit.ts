@@ -1,11 +1,66 @@
 import { getServerUrl, getToken } from "./api";
 
-export function getLiveKitUrl(): string {
-  return localStorage.getItem("chitchat_livekit_url") || import.meta.env.VITE_LIVEKIT_URL || "";
+const LIVEKIT_URLS_BY_SERVER_KEY = "chitchat_livekit_urls_by_server";
+const LEGACY_LIVEKIT_URL_KEY = "chitchat_livekit_url";
+
+function normalizeServerUrl(url: string) {
+  return (url || "").trim().replace(/\/+$/, "").toLowerCase();
 }
 
-export function setLiveKitUrl(url: string) {
-  localStorage.setItem("chitchat_livekit_url", url);
+function readLiveKitUrlsByServer(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(LIVEKIT_URLS_BY_SERVER_KEY);
+    const parsed = raw ? (JSON.parse(raw) as Record<string, string>) : {};
+    if (!parsed || typeof parsed !== "object") return {};
+    const next: Record<string, string> = {};
+    for (const [serverUrl, livekitUrl] of Object.entries(parsed)) {
+      const normalizedServerUrl = normalizeServerUrl(serverUrl);
+      const normalizedLivekitUrl = (livekitUrl || "").trim();
+      if (!normalizedServerUrl || !normalizedLivekitUrl) continue;
+      next[normalizedServerUrl] = normalizedLivekitUrl;
+    }
+    return next;
+  } catch {
+    return {};
+  }
+}
+
+function writeLiveKitUrlsByServer(next: Record<string, string>) {
+  localStorage.setItem(LIVEKIT_URLS_BY_SERVER_KEY, JSON.stringify(next));
+}
+
+export function getLiveKitUrl(serverUrl = getServerUrl()): string {
+  const normalizedServerUrl = normalizeServerUrl(serverUrl);
+  const byServer = readLiveKitUrlsByServer();
+  if (normalizedServerUrl && byServer[normalizedServerUrl]) {
+    return byServer[normalizedServerUrl];
+  }
+  if (normalizedServerUrl) {
+    // For known servers, avoid falling back to legacy global URL (prevents cross-server leakage).
+    return import.meta.env.VITE_LIVEKIT_URL || "";
+  }
+
+  // Backward compatibility: use legacy global value if present.
+  return localStorage.getItem(LEGACY_LIVEKIT_URL_KEY) || import.meta.env.VITE_LIVEKIT_URL || "";
+}
+
+export function setLiveKitUrl(url: string, serverUrl = getServerUrl()) {
+  const normalizedServerUrl = normalizeServerUrl(serverUrl);
+  if (!normalizedServerUrl) return;
+
+  const byServer = readLiveKitUrlsByServer();
+  const trimmedUrl = (url || "").trim();
+  if (!trimmedUrl) {
+    delete byServer[normalizedServerUrl];
+  } else {
+    byServer[normalizedServerUrl] = trimmedUrl;
+  }
+  writeLiveKitUrlsByServer(byServer);
+
+  // Keep legacy key for old clients and manual inspection.
+  if (trimmedUrl) {
+    localStorage.setItem(LEGACY_LIVEKIT_URL_KEY, trimmedUrl);
+  }
 }
 
 export interface MediaLimits {
