@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import EmojiPicker, { type EmojiClickData, Theme } from "emoji-picker-react";
-import { ImageIcon, Paperclip, Search, SmilePlus, X } from "lucide-react";
+import { Paperclip, Search, SmilePlus, X } from "lucide-react";
 import { getServerUrl, getToken } from "../../lib/api";
 import type { MessageAttachment } from "../../types";
 
@@ -118,6 +118,17 @@ export default function MessageInput({
     window.addEventListener("mousedown", onDocumentClick);
     return () => window.removeEventListener("mousedown", onDocumentClick);
   }, [emojiPickerOpen, gifPickerOpen]);
+
+  useEffect(() => {
+    if (!replyTo) return;
+    requestAnimationFrame(() => {
+      const input = messageInputRef.current;
+      if (!input) return;
+      input.focus();
+      const cursor = input.value.length;
+      input.setSelectionRange(cursor, cursor);
+    });
+  }, [replyTo]);
 
   async function fetchGifs(kind: "trending" | "search", query = "") {
     const token = getToken();
@@ -463,7 +474,7 @@ export default function MessageInput({
               disabled={disabled || uploading}
               title="Insert GIF"
             >
-              <ImageIcon size={16} />
+              <span className="chat-gif-trigger">GIF</span>
             </button>
             {gifPickerOpen && (
               <div className="chat-gif-picker">

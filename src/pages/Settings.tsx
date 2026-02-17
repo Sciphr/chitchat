@@ -298,25 +298,51 @@ export default function Settings({ onClose }: SettingsProps) {
     await saveProfile();
   }
 
-  async function requestDesktopNotificationPermission() {
+  async function requestDesktopNotificationPermission(): Promise<
+    NotificationPermission | "unsupported"
+  > {
     if (typeof window === "undefined" || !("Notification" in window)) {
       setError("Desktop notifications are not supported on this platform.");
-      return;
+      return "unsupported";
     }
     try {
       const permission = await Notification.requestPermission();
       setNotificationPermission(permission);
       if (permission !== "granted") {
+        setForm((prev) => ({ ...prev, desktopNotificationsEnabled: false }));
         setError(
-          "Desktop notification permission was not granted. You can enable it later in system/browser settings."
+          permission === "denied"
+            ? "Desktop notifications are blocked by your system/browser. Allow notifications for ChitChat and try again."
+            : "Desktop notification permission was not granted."
         );
       } else {
         setError("");
         setSuccess("Desktop notification permission granted.");
       }
+      return permission;
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to request notification permission");
+      return "denied";
     }
+  }
+
+  async function handleDesktopNotificationsToggle() {
+    const nextEnabled = !form.desktopNotificationsEnabled;
+    if (!nextEnabled) {
+      setForm((prev) => ({ ...prev, desktopNotificationsEnabled: false }));
+      return;
+    }
+
+    if (notificationPermission !== "granted") {
+      const permission = await requestDesktopNotificationPermission();
+      if (permission !== "granted") {
+        setForm((prev) => ({ ...prev, desktopNotificationsEnabled: false }));
+        return;
+      }
+    }
+
+    setForm((prev) => ({ ...prev, desktopNotificationsEnabled: true }));
+    setError("");
   }
 
   function handleReset() {
@@ -681,8 +707,8 @@ export default function Settings({ onClose }: SettingsProps) {
             </button>
           </div>
 
-          <div className="grid gap-10 md:grid-cols-[280px_1fr]">
-            <div className="space-y-6">
+          <div className="grid gap-10 md:grid-cols-[280px_1fr] settings-layout-grid">
+            <div className="space-y-6 settings-sidebar-pane">
               <div className="profile-card">
                 <div className="profile-card-media">
                   {form.avatarUrl ? (
@@ -751,7 +777,7 @@ export default function Settings({ onClose }: SettingsProps) {
             </div>
 
             {activeTab === "settings" ? (
-              <form onSubmit={handleSave} className="space-y-6">
+              <form onSubmit={handleSave} className="space-y-6 settings-content-pane">
                 <div className="settings-section-nav" role="tablist" aria-label="Settings sections">
                   <button
                     type="button"
@@ -796,6 +822,7 @@ export default function Settings({ onClose }: SettingsProps) {
                     About
                   </button>
                 </div>
+                <div className="settings-content-body">
                 {activeSettingsSection === "identity" && (
                 <div className="profile-section">
                   <div className="profile-section-title">Identity</div>
@@ -891,12 +918,7 @@ export default function Settings({ onClose }: SettingsProps) {
                       <label className="profile-label">Desktop notifications</label>
                       <button
                         type="button"
-                        onClick={() =>
-                          setForm((prev) => ({
-                            ...prev,
-                            desktopNotificationsEnabled: !prev.desktopNotificationsEnabled,
-                          }))
-                        }
+                        onClick={() => void handleDesktopNotificationsToggle()}
                         className={`ptt-toggle ${
                           form.desktopNotificationsEnabled ? "active" : ""
                         }`}
@@ -1397,9 +1419,10 @@ export default function Settings({ onClose }: SettingsProps) {
                     {saving ? "Saving..." : "Save changes"}
                   </button>
                 </div>
+                </div>
               </form>
             ) : (
-              <div className="profile-public-pane">
+              <div className="profile-public-pane settings-content-pane">
                 <div className="profile-section">
                   <div className="profile-section-title">Public Profile</div>
                   <div className="profile-public-name heading-font">

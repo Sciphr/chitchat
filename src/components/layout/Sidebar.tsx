@@ -23,6 +23,7 @@ interface SidebarProps {
   rooms: Room[];
   categories: RoomCategory[];
   dmRooms: Room[];
+  onHideDM: (roomId: string) => void;
   activeRoom: Room | null;
   onSelectRoom: (room: Room) => void;
   onCreateRoom: (name: string, type: "text" | "voice", categoryId?: string) => void;
@@ -69,6 +70,7 @@ export default function Sidebar({
   rooms,
   categories,
   dmRooms,
+  onHideDM,
   activeRoom,
   onSelectRoom,
   onCreateRoom,
@@ -1280,28 +1282,45 @@ export default function Sidebar({
               {dmRooms.map((dm) => {
                 const displayName = dm.other_username || "Unknown User";
                 return (
-                  <motion.button
+                  <motion.div
                     key={dm.id}
                     layout
                     initial={{ opacity: 0, x: -20, height: 0 }}
                     animate={{ opacity: 1, x: 0, height: "auto" }}
                     exit={{ opacity: 0, x: -20, height: 0 }}
                     transition={{ duration: 0.25, ease: "easeOut" }}
-                    onClick={() => onSelectRoom(dm)}
-                    className={`sidebar-channel ${activeRoom?.id === dm.id ? "active" : ""}`}
+                    className={`sidebar-channel sidebar-dm-row ${activeRoom?.id === dm.id ? "active" : ""}`}
                   >
-                    <span className="sidebar-channel-main">
-                      <span className="sidebar-dm-avatar">
-                        {dm.other_avatar_url ? (
-                          <img src={dm.other_avatar_url} alt="" />
-                        ) : (
-                          displayName.charAt(0).toUpperCase()
-                        )}
+                    <button
+                      type="button"
+                      onClick={() => onSelectRoom(dm)}
+                      className="sidebar-dm-open"
+                    >
+                      <span className="sidebar-channel-main">
+                        <span className="sidebar-dm-avatar">
+                          {dm.other_avatar_url ? (
+                            <img src={dm.other_avatar_url} alt="" />
+                          ) : (
+                            displayName.charAt(0).toUpperCase()
+                          )}
+                        </span>
+                        <span className="sidebar-channel-main-text">{displayName}</span>
                       </span>
-                      <span className="sidebar-channel-main-text">{displayName}</span>
-                    </span>
-                    {renderRoomBadges(dm.id)}
-                  </motion.button>
+                      {renderRoomBadges(dm.id)}
+                    </button>
+                    <button
+                      type="button"
+                      className="sidebar-dm-hide"
+                      title={`Hide DM with ${displayName}`}
+                      aria-label={`Hide DM with ${displayName}`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onHideDM(dm.id);
+                      }}
+                    >
+                      <span aria-hidden="true">x</span>
+                    </button>
+                  </motion.div>
                 );
               })}
             </AnimatePresence>

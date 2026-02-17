@@ -127,11 +127,49 @@ export default function Home() {
     () => `chitchat-notifications:${serverUrl}:${user?.id ?? "anon"}`,
     [serverUrl, user?.id]
   );
+  const hiddenDmsStorageKey = useMemo(
+    () => `chitchat-hidden-dms:${serverUrl}:${user?.id ?? "anon"}`,
+    [serverUrl, user?.id]
+  );
   const selfUserIdRef = useRef<string | null>(null);
+  const [hiddenDmByRoomId, setHiddenDmByRoomId] = useState<Record<string, boolean>>({});
+  const hiddenDmByRoomIdRef = useRef<Record<string, boolean>>({});
 
   useEffect(() => {
     selfUserIdRef.current = user?.id ?? null;
   }, [user?.id]);
+
+  useEffect(() => {
+    hiddenDmByRoomIdRef.current = hiddenDmByRoomId;
+  }, [hiddenDmByRoomId]);
+
+  useEffect(() => {
+    if (!user?.id) {
+      setHiddenDmByRoomId({});
+      return;
+    }
+    try {
+      const raw = localStorage.getItem(hiddenDmsStorageKey);
+      if (!raw) {
+        setHiddenDmByRoomId({});
+        return;
+      }
+      const parsed = JSON.parse(raw) as Record<string, boolean>;
+      setHiddenDmByRoomId(parsed || {});
+    } catch {
+      setHiddenDmByRoomId({});
+    }
+  }, [hiddenDmsStorageKey, user?.id]);
+
+  useEffect(() => {
+    if (!user?.id) return;
+    localStorage.setItem(hiddenDmsStorageKey, JSON.stringify(hiddenDmByRoomId));
+  }, [hiddenDmsStorageKey, hiddenDmByRoomId, user?.id]);
+
+  const visibleDmRooms = useMemo(
+    () => dmRooms.filter((room) => !hiddenDmByRoomId[room.id]),
+    [dmRooms, hiddenDmByRoomId]
+  );
 
   function toggleMemberList() {
     setMemberListOpen((prev) => {
@@ -305,6 +343,12 @@ export default function Home() {
     }
 
     function onDmNew(room: Room) {
+      setHiddenDmByRoomId((prev) => {
+        if (!prev[room.id]) return prev;
+        const next = { ...prev };
+        delete next[room.id];
+        return next;
+      });
       setDmRooms((prev) => {
         if (prev.some((r) => r.id === room.id)) return prev;
         return [room, ...prev];
@@ -446,6 +490,12 @@ export default function Home() {
         { targetUserId: targetUser.id },
         (ack: { room: Room | null }) => {
           if (ack?.room) {
+            setHiddenDmByRoomId((prev) => {
+              if (!prev[ack.room!.id]) return prev;
+              const next = { ...prev };
+              delete next[ack.room!.id];
+              return next;
+            });
             setDmRooms((prev) => {
               if (prev.some((r) => r.id === ack.room!.id)) return prev;
               return [ack.room!, ...prev];
@@ -817,6 +867,14 @@ export default function Home() {
       const room =
         rooms.find((entry) => entry.id === payload.room_id) ||
         dmRooms.find((entry) => entry.id === payload.room_id);
+      if (room?.type === "dm" && hiddenDmByRoomIdRef.current[payload.room_id]) {
+        setHiddenDmByRoomId((prev) => {
+          if (!prev[payload.room_id]) return prev;
+          const next = { ...prev };
+          delete next[payload.room_id];
+          return next;
+        });
+      }
       const notificationMode = notificationModesByRoom[payload.room_id] ?? "all";
       const mentioned = hasUserMention(payload.content, profile.username);
       const shouldNotifyByRoom =
@@ -897,6 +955,17 @@ export default function Home() {
     profile.desktopNotificationsEnabled,
     profile.desktopNotificationsMentionsOnly,
   ]);
+
+  const handleHideDM = useCallback(
+    (roomId: string) => {
+      setHiddenDmByRoomId((prev) => ({ ...prev, [roomId]: true }));
+      setActiveRoom((prev) => {
+        if (prev?.id !== roomId) return prev;
+        return rooms[0] ?? null;
+      });
+    },
+    [rooms]
+  );
 
   useEffect(() => {
     if (!isConnected || !user?.id) return;
@@ -1054,7 +1123,8 @@ export default function Home() {
         <Sidebar
           rooms={rooms}
           categories={categories}
-          dmRooms={dmRooms}
+          dmRooms={visibleDmRooms}
+          onHideDM={handleHideDM}
           activeRoom={activeRoom}
           onSelectRoom={handleSelectRoom}
           onCreateRoom={handleCreateRoom}
