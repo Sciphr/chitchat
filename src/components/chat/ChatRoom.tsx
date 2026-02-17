@@ -30,6 +30,7 @@ interface ChatRoomProps {
   canManageMessages: boolean;
   canPinMessages: boolean;
   canUseEmojis: boolean;
+  canUseGifs: boolean;
   unreadCount?: number;
   firstUnreadAt?: string;
   onMarkRead?: (roomId: string) => void;
@@ -108,6 +109,27 @@ function getFirstYouTubeEmbedUrl(text: string): string | null {
       if (parsed.hostname.includes("youtube.com")) {
         const id = parsed.searchParams.get("v");
         if (id) return `https://www.youtube.com/embed/${id}`;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+function getFirstImageEmbedUrl(text: string): string | null {
+  const match = text.match(/https?:\/\/[^\s]+/gi);
+  if (!match) return null;
+  for (const raw of match) {
+    try {
+      const parsed = new URL(raw);
+      const pathname = parsed.pathname.toLowerCase();
+      if (
+        /\.(gif|png|jpe?g|webp)$/i.test(pathname) ||
+        parsed.hostname.endsWith("giphy.com") ||
+        parsed.hostname.endsWith("giphyusercontent.com")
+      ) {
+        return raw;
       }
     } catch {
       continue;
@@ -349,6 +371,7 @@ export default function ChatRoom({
   canManageMessages,
   canPinMessages,
   canUseEmojis,
+  canUseGifs,
   unreadCount = 0,
   firstUnreadAt,
   onMarkRead,
@@ -1123,6 +1146,7 @@ export default function ChatRoom({
             (isOwnMessage || isAdmin || canManageMessages);
           const isPinned = Boolean(pinnedByMessageId[msg.id]);
           const youtubeEmbedUrl = getFirstYouTubeEmbedUrl(msg.content);
+          const imageEmbedUrl = getFirstImageEmbedUrl(msg.content);
 
           return (
             <Fragment key={msg.id}>
@@ -1225,6 +1249,16 @@ export default function ChatRoom({
                         title="Video preview"
                         allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
                         allowFullScreen
+                      />
+                    </div>
+                  )}
+                  {!youtubeEmbedUrl && imageEmbedUrl && (
+                    <div className="chat-embed">
+                      <img
+                        src={imageEmbedUrl}
+                        alt="Embedded image"
+                        style={{ maxWidth: "100%", borderRadius: 10 }}
+                        loading="lazy"
                       />
                     </div>
                   )}
@@ -1331,6 +1365,7 @@ export default function ChatRoom({
         onSend={(content, attachments) => handleSend(content, attachments || [])}
         onTypingChange={handleTypingChange}
         mentionUsernames={mentionableUsernames}
+        canUseGifs={canUseGifs}
         replyTo={
           replyTo
             ? {

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import EmojiPicker, { type EmojiClickData, Theme } from "emoji-picker-react";
-import { Paperclip, SmilePlus, X } from "lucide-react";
+import { ImageIcon, Paperclip, Search, SmilePlus, X } from "lucide-react";
 import { getServerUrl, getToken } from "../../lib/api";
 import type { MessageAttachment } from "../../types";
 
@@ -10,12 +10,21 @@ interface MessageInputProps {
   placeholder?: string;
   onTypingChange?: (isTyping: boolean) => void;
   mentionUsernames?: string[];
+  canUseGifs?: boolean;
   replyTo?: {
     username: string;
     content: string;
   } | null;
   onCancelReply?: () => void;
 }
+
+type GifSearchResult = {
+  id: string;
+  title: string;
+  gifUrl: string;
+  width?: number;
+  height?: number;
+};
 
 type ActiveMention = {
   start: number;
@@ -47,6 +56,7 @@ export default function MessageInput({
   placeholder = "Type a message...",
   onTypingChange,
   mentionUsernames = [],
+  canUseGifs = false,
   replyTo = null,
   onCancelReply,
 }: MessageInputProps) {
@@ -59,11 +69,17 @@ export default function MessageInput({
   const [activeMention, setActiveMention] = useState<ActiveMention | null>(null);
   const [mentionMenuIndex, setMentionMenuIndex] = useState(0);
   const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
+  const [gifPickerOpen, setGifPickerOpen] = useState(false);
+  const [gifQuery, setGifQuery] = useState("");
+  const [gifResults, setGifResults] = useState<GifSearchResult[]>([]);
+  const [gifLoading, setGifLoading] = useState(false);
+  const [gifError, setGifError] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const messageInputRef = useRef<HTMLInputElement | null>(null);
   const activeUploadRequestRef = useRef<XMLHttpRequest | null>(null);
   const emojiPickerRef = useRef<HTMLDivElement | null>(null);
+  const gifPickerRef = useRef<HTMLDivElement | null>(null);
 
   const mentionSuggestions = useMemo(() => {
     if (!activeMention) return [];
@@ -84,7 +100,7 @@ export default function MessageInput({
   }, [mentionUsernames, activeMention]);
 
   useEffect(() => {
-    if (!emojiPickerOpen) return;
+    if (!emojiPickerOpen && !gifPickerOpen) return;
     function onDocumentClick(event: MouseEvent) {
       if (
         emojiPickerRef.current &&
@@ -92,10 +108,56 @@ export default function MessageInput({
       ) {
         setEmojiPickerOpen(false);
       }
+      if (
+        gifPickerRef.current &&
+        !gifPickerRef.current.contains(event.target as Node)
+      ) {
+        setGifPickerOpen(false);
+      }
     }
     window.addEventListener("mousedown", onDocumentClick);
     return () => window.removeEventListener("mousedown", onDocumentClick);
-  }, [emojiPickerOpen]);
+  }, [emojiPickerOpen, gifPickerOpen]);
+
+  async function fetchGifs(kind: "trending" | "search", query = "") {
+    const token = getToken();
+    if (!token) return;
+    setGifLoading(true);
+    setGifError(null);
+    try {
+      const endpoint =
+        kind === "search"
+          ? `/api/gifs/search?q=${encodeURIComponent(query)}`
+          : "/api/gifs/trending";
+      const res = await fetch(`${getServerUrl()}${endpoint}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        results?: GifSearchResult[];
+        error?: string;
+      };
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to load GIFs");
+      }
+      setGifResults((data.results || []).filter((item) => Boolean(item.gifUrl)));
+    } catch (err) {
+      setGifError(err instanceof Error ? err.message : "Failed to load GIFs");
+      setGifResults([]);
+    } finally {
+      setGifLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!gifPickerOpen || !canUseGifs) return;
+    if (gifQuery.trim().length >= 2) {
+      const timer = window.setTimeout(() => {
+        void fetchGifs("search", gifQuery.trim());
+      }, 250);
+      return () => window.clearTimeout(timer);
+    }
+    void fetchGifs("trending");
+  }, [gifPickerOpen, gifQuery, canUseGifs]);
 
   function formatBytes(size: number) {
     if (size < 1024) return `${size} B`;
@@ -259,6 +321,12 @@ export default function MessageInput({
     setEmojiPickerOpen(false);
   }
 
+  function onGifSelect(result: GifSearchResult) {
+    if (!result.gifUrl) return;
+    insertEmoji(`${result.gifUrl} `);
+    setGifPickerOpen(false);
+  }
+
   function addFiles(files: File[]) {
     if (files.length === 0) return;
     setSelectedFiles((prev) => [...prev, ...files]);
@@ -386,6 +454,63 @@ export default function MessageInput({
             </div>
           )}
         </div>
+        {canUseGifs && (
+          <div className="chat-emoji-wrap" ref={gifPickerRef}>
+            <button
+              type="button"
+              className="chat-emoji-btn"
+              onClick={() => setGifPickerOpen((prev) => !prev)}
+              disabled={disabled || uploading}
+              title="Insert GIF"
+            >
+              <ImageIcon size={16} />
+            </button>
+            {gifPickerOpen && (
+              <div className="chat-gif-picker">
+                <div className="chat-gif-search">
+                  <Search size={14} />
+                  <input
+                    type="text"
+                    value={gifQuery}
+                    onChange={(e) => setGifQuery(e.target.value)}
+                    placeholder="Search GIFs"
+                  />
+                </div>
+                <div className="chat-gif-results">
+                  {gifLoading ? (
+                    <div className="chat-gif-empty">Loading...</div>
+                  ) : gifError ? (
+                    <div className="chat-gif-empty">{gifError}</div>
+                  ) : gifResults.length === 0 ? (
+                    <div className="chat-gif-empty">No GIFs found</div>
+                  ) : (
+                    gifResults.map((result) => (
+                      <button
+                        key={result.id}
+                        type="button"
+                        className="chat-gif-item"
+                        onClick={() => onGifSelect(result)}
+                        title={result.title || "Insert GIF"}
+                      >
+                        <img src={result.gifUrl} alt={result.title || "GIF"} loading="lazy" />
+                      </button>
+                    ))
+                  )}
+                </div>
+                <div className="chat-gif-powered">
+                  Powered by{" "}
+                  <a
+                    href="https://giphy.com/"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    GIPHY
+                  </a>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
         <input
           ref={messageInputRef}

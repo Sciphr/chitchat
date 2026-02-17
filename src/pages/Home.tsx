@@ -100,6 +100,7 @@ export default function Home() {
     userCanCreateRooms?: boolean;
     serverAnnouncement?: string;
     serverAnnouncementId?: string;
+    gifsEnabled?: boolean;
   } | null>(null);
   const lastNotificationSoundAtRef = useRef(0);
   const lastDesktopNotificationAtRef = useRef(0);
@@ -158,6 +159,7 @@ export default function Home() {
           userCanCreateRooms?: boolean;
           serverAnnouncement?: string;
           serverAnnouncementId?: string;
+          gifs?: { enabled?: boolean };
         };
         setServerInfo({
           name: data.name || "Server",
@@ -165,6 +167,7 @@ export default function Home() {
           userCanCreateRooms: data.userCanCreateRooms,
           serverAnnouncement: data.serverAnnouncement || "",
           serverAnnouncementId: data.serverAnnouncementId || "",
+          gifsEnabled: Boolean(data.gifs?.enabled),
         });
       } catch (error) {
         if ((error as Error)?.name === "AbortError") return;
@@ -1135,6 +1138,7 @@ export default function Home() {
                   canManageMessages={canManageMessages}
                   canPinMessages={canPinMessages}
                   canUseEmojis={canUseEmojis}
+                  canUseGifs={Boolean(serverInfo?.gifsEnabled)}
                   unreadCount={unreadByRoom[activeRoom.id] ?? 0}
                   firstUnreadAt={firstUnreadAtByRoom[activeRoom.id]}
                   onMarkRead={markRoomRead}
