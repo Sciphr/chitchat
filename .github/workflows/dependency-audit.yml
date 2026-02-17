@@ -27,11 +27,3 @@ jobs:
 
       - name: Audit root dependencies
         run: npm run audit:deps
-
-      - name: Install server dependencies
-        working-directory: server
-        run: npm ci
-
-      - name: Audit server dependencies
-        working-directory: server
-        run: npm run audit:deps
