@@ -15,6 +15,7 @@ DATA_DIR="/var/lib/chitchat"
 SERVICE_USER="chitchat"
 SERVICE_NAME="chitchat"
 NODE_MAJOR=20
+HEALTH_TIMEOUT_SECONDS=45
 
 LIVEKIT_CONFIG="/etc/livekit.yaml"
 LIVEKIT_SERVICE="livekit-server"
@@ -34,11 +35,129 @@ ok()    { echo -e "${GREEN}  ✓${RESET} $1"; }
 warn()  { echo -e "${YELLOW}  !${RESET} $1"; }
 fail()  { echo -e "${RED}  ✗${RESET} $1"; exit 1; }
 
+usage() {
+  cat <<'USAGE'
+Usage:
+  sudo bash install.sh [version] [options]
+
+Options:
+  --non-interactive            Run first-time setup without prompts (requires admin flags)
+  --admin-email <email>        Admin email for first-time setup
+  --admin-username <username>  Admin username for first-time setup
+  --admin-password <password>  Admin password for first-time setup
+  --server-name <name>         Server name for first-time setup
+  --data-dir <path>            Override persistent data directory (default: /var/lib/chitchat)
+  --help                       Show this help
+USAGE
+}
+
 # Generate a random alphanumeric string
 random_string() {
   local len="${1:-32}"
   head -c 256 /dev/urandom | tr -dc 'a-zA-Z0-9' | head -c "$len"
 }
+
+VERSION="latest"
+NON_INTERACTIVE=false
+SETUP_ADMIN_EMAIL=""
+SETUP_ADMIN_USERNAME=""
+SETUP_ADMIN_PASSWORD=""
+SETUP_SERVER_NAME=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    --non-interactive)
+      NON_INTERACTIVE=true
+      shift
+      ;;
+    --admin-email)
+      [ $# -ge 2 ] || fail "--admin-email requires a value"
+      SETUP_ADMIN_EMAIL="$2"
+      shift 2
+      ;;
+    --admin-username)
+      [ $# -ge 2 ] || fail "--admin-username requires a value"
+      SETUP_ADMIN_USERNAME="$2"
+      shift 2
+      ;;
+    --admin-password)
+      [ $# -ge 2 ] || fail "--admin-password requires a value"
+      SETUP_ADMIN_PASSWORD="$2"
+      shift 2
+      ;;
+    --server-name)
+      [ $# -ge 2 ] || fail "--server-name requires a value"
+      SETUP_SERVER_NAME="$2"
+      shift 2
+      ;;
+    --data-dir)
+      [ $# -ge 2 ] || fail "--data-dir requires a value"
+      DATA_DIR="$2"
+      shift 2
+      ;;
+    -*)
+      fail "Unknown option: $1"
+      ;;
+    *)
+      if [ "$VERSION" = "latest" ]; then
+        VERSION="$1"
+      else
+        fail "Unexpected positional argument: $1"
+      fi
+      shift
+      ;;
+  esac
+done
+
+ROLLBACK_READY=false
+PREV_REF=""
+BACKUP_DIR=""
+PRE_UPDATE_CONFIG_BACKUP=""
+PRE_UPDATE_DB_BACKUP=""
+
+rollback_on_error() {
+  local exit_code=$?
+  trap - ERR
+  set +e
+
+  if [ "${ROLLBACK_READY}" = "true" ]; then
+    warn "Install/update failed. Attempting rollback to previous known-good state..."
+
+    if [ -n "${PREV_REF}" ] && [ -d "${APP_DIR}/.git" ]; then
+      git -C "$APP_DIR" checkout --quiet "$PREV_REF" >/dev/null 2>&1
+      if [ -d "${APP_DIR}/server" ]; then
+        (
+          cd "${APP_DIR}/server" || exit 1
+          npm ci --quiet >/dev/null 2>&1
+          npm run build --quiet >/dev/null 2>&1
+          npm prune --omit=dev --quiet >/dev/null 2>&1
+        )
+      fi
+    fi
+
+    if [ -n "${PRE_UPDATE_CONFIG_BACKUP}" ] && [ -f "${PRE_UPDATE_CONFIG_BACKUP}" ]; then
+      cp -f "${PRE_UPDATE_CONFIG_BACKUP}" "${DATA_DIR}/config.json"
+    fi
+    if [ -n "${PRE_UPDATE_DB_BACKUP}" ] && [ -f "${PRE_UPDATE_DB_BACKUP}" ]; then
+      cp -f "${PRE_UPDATE_DB_BACKUP}" "${DATA_DIR}/chitchat.db"
+    fi
+
+    if systemctl list-unit-files | grep -q "^${SERVICE_NAME}\\.service"; then
+      systemctl daemon-reload >/dev/null 2>&1
+      systemctl restart "${SERVICE_NAME}" >/dev/null 2>&1
+    fi
+
+    warn "Rollback attempted. Inspect logs with: sudo journalctl -u ${SERVICE_NAME} -n 200 --no-pager"
+  fi
+
+  exit "$exit_code"
+}
+
+trap rollback_on_error ERR
 
 # ─── Pre-flight checks ───────────────────────────────────────────────
 
@@ -247,8 +366,6 @@ fi
 
 # ─── Determine version ───────────────────────────────────────────────
 
-VERSION="${1:-latest}"
-
 if [ "$VERSION" = "latest" ]; then
   info "Fetching latest release..."
   VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/' || echo "")
@@ -268,8 +385,21 @@ ok "Version: ${VERSION}"
 git config --global --add safe.directory "$APP_DIR" 2>/dev/null
 
 if [ -d "${APP_DIR}/.git" ]; then
-  # Existing installation — pull updates
+  # Existing installation - pull updates with rollback checkpoints
   info "Updating existing installation..."
+  PREV_REF=$(git -C "$APP_DIR" rev-parse HEAD 2>/dev/null || echo "")
+  BACKUP_DIR="${DATA_DIR}/backups/install-$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$BACKUP_DIR"
+  if [ -f "${DATA_DIR}/config.json" ]; then
+    PRE_UPDATE_CONFIG_BACKUP="${BACKUP_DIR}/config.json.pre-update"
+    cp -f "${DATA_DIR}/config.json" "$PRE_UPDATE_CONFIG_BACKUP"
+  fi
+  if [ -f "${DATA_DIR}/chitchat.db" ]; then
+    PRE_UPDATE_DB_BACKUP="${BACKUP_DIR}/chitchat.db.pre-update"
+    cp -f "${DATA_DIR}/chitchat.db" "$PRE_UPDATE_DB_BACKUP"
+  fi
+  ROLLBACK_READY=true
+
   cd "$APP_DIR"
   git fetch --all --quiet
   if [ "$VERSION" = "main" ]; then
@@ -280,7 +410,7 @@ if [ -d "${APP_DIR}/.git" ]; then
   fi
   ok "Updated to ${VERSION}"
 else
-  # Fresh install — clone the repo
+  # Fresh install - clone the repo
   info "Downloading ChitChat..."
   if [ -d "$APP_DIR" ]; then
     rm -rf "$APP_DIR"
@@ -340,17 +470,45 @@ if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
   systemctl stop "$SERVICE_NAME"
 fi
 
-# Check if config already exists (upgrade scenario)
+CONFIG_EXISTED=false
 if [ -f "${DATA_DIR}/config.json" ]; then
+  CONFIG_EXISTED=true
+fi
+
+info "Running database migration preflight..."
+sudo -u "$SERVICE_USER" env DATA_DIR="$DATA_DIR" node "${APP_DIR}/server/dist/index.js" --migrate-only
+ok "Database migration preflight complete"
+
+# Check if config already exists (upgrade scenario)
+if [ "${CONFIG_EXISTED}" = "true" ]; then
   ok "Existing config found, skipping setup"
 else
-  info "Running first-time setup..."
-  echo ""
+  if [ "$NON_INTERACTIVE" = "true" ]; then
+    [ -n "$SETUP_ADMIN_EMAIL" ] || fail "Missing --admin-email for --non-interactive first install"
+    [ -n "$SETUP_ADMIN_USERNAME" ] || fail "Missing --admin-username for --non-interactive first install"
+    [ -n "$SETUP_ADMIN_PASSWORD" ] || fail "Missing --admin-password for --non-interactive first install"
 
-  # Run setup interactively as the chitchat user
-  # Note: </dev/tty is required when running via curl|bash so stdin reads from the terminal
-  cd "$DATA_DIR"
-  sudo -u "$SERVICE_USER" node "${APP_DIR}/server/dist/index.js" --setup </dev/tty
+    info "Running first-time setup (non-interactive)..."
+    setup_args=(
+      --setup
+      --admin-email "$SETUP_ADMIN_EMAIL"
+      --admin-username "$SETUP_ADMIN_USERNAME"
+      --admin-password "$SETUP_ADMIN_PASSWORD"
+    )
+    if [ -n "$SETUP_SERVER_NAME" ]; then
+      setup_args+=(--server-name "$SETUP_SERVER_NAME")
+    fi
+
+    sudo -u "$SERVICE_USER" env DATA_DIR="$DATA_DIR" node "${APP_DIR}/server/dist/index.js" "${setup_args[@]}"
+  else
+    info "Running first-time setup..."
+    echo ""
+
+    # Run setup interactively as the chitchat user
+    # Note: </dev/tty is required when running via curl|bash so stdin reads from the terminal
+    cd "$DATA_DIR"
+    sudo -u "$SERVICE_USER" env DATA_DIR="$DATA_DIR" node "${APP_DIR}/server/dist/index.js" --setup </dev/tty
+  fi
 fi
 
 # ─── Auto-configure LiveKit in ChitChat config ───────────────────────
@@ -414,6 +572,7 @@ PrivateTmp=true
 
 # Environment
 Environment=NODE_ENV=production
+Environment=DATA_DIR=${DATA_DIR}
 
 [Install]
 WantedBy=multi-user.target
@@ -428,13 +587,25 @@ ok "Systemd service installed and enabled"
 info "Starting ChitChat server..."
 systemctl start "$SERVICE_NAME"
 
-# Wait a moment and check status
+# Wait a moment and check status + health endpoint
 sleep 3
+PORT=$(grep '"port"' "${DATA_DIR}/config.json" 2>/dev/null | head -1 | sed -E 's/.*: *([0-9]+).*/\1/' || echo "3001")
 
-if systemctl is-active --quiet "$SERVICE_NAME"; then
-  ok "Server is running!"
-else
-  warn "Server may have failed to start. Check: journalctl -u ${SERVICE_NAME} -f"
+if ! systemctl is-active --quiet "$SERVICE_NAME"; then
+  fail "Server failed to start. Check: journalctl -u ${SERVICE_NAME} -n 200 --no-pager"
+fi
+
+for _ in $(seq 1 "$HEALTH_TIMEOUT_SECONDS"); do
+  if curl -fsS "http://127.0.0.1:${PORT}/api/health" >/dev/null 2>&1; then
+    ok "Server is running and passed health check"
+    ROLLBACK_READY=false
+    break
+  fi
+  sleep 1
+done
+
+if [ "${ROLLBACK_READY}" = "true" ]; then
+  fail "Server did not pass health check at http://127.0.0.1:${PORT}/api/health"
 fi
 
 # ─── Done ─────────────────────────────────────────────────────────────
