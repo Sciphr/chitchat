@@ -1,5 +1,7 @@
 use std::process::Command;
+use enigo::{Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 use serde::Serialize;
+use serde::Deserialize;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
@@ -107,6 +109,119 @@ fn detect_running_game() -> GameDetection {
     GameDetection::None
 }
 
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum RemoteControlInputEvent {
+    #[serde(rename = "pointer_move")]
+    PointerMove {
+        #[serde(rename = "xNorm")]
+        x_norm: f64,
+        #[serde(rename = "yNorm")]
+        y_norm: f64,
+    },
+    #[serde(rename = "pointer_down")]
+    PointerDown { button: String },
+    #[serde(rename = "pointer_up")]
+    PointerUp { button: String },
+    #[serde(rename = "wheel")]
+    Wheel {
+        #[serde(rename = "deltaY")]
+        delta_y: f64,
+    },
+    #[serde(rename = "key_down")]
+    KeyDown { key: String },
+    #[serde(rename = "key_up")]
+    KeyUp { key: String },
+}
+
+fn to_mouse_button(name: &str) -> Option<Button> {
+    match name {
+        "left" => Some(Button::Left),
+        "right" => Some(Button::Right),
+        "middle" => Some(Button::Middle),
+        _ => None,
+    }
+}
+
+fn to_key(name: &str) -> Key {
+    match name {
+        "Enter" => Key::Return,
+        "Escape" => Key::Escape,
+        "Backspace" => Key::Backspace,
+        "Tab" => Key::Tab,
+        "Space" | " " => Key::Space,
+        "ArrowUp" => Key::UpArrow,
+        "ArrowDown" => Key::DownArrow,
+        "ArrowLeft" => Key::LeftArrow,
+        "ArrowRight" => Key::RightArrow,
+        _ => {
+            if name.chars().count() == 1 {
+                Key::Unicode(name.chars().next().unwrap_or(' '))
+            } else {
+                Key::Unicode(' ')
+            }
+        }
+    }
+}
+
+#[tauri::command]
+fn apply_remote_control_input(
+    app_handle: tauri::AppHandle,
+    event: RemoteControlInputEvent,
+) -> Result<(), String> {
+    let mut enigo = Enigo::new(&Settings::default()).map_err(|e| e.to_string())?;
+    match event {
+        RemoteControlInputEvent::PointerMove { x_norm, y_norm } => {
+            let monitor = app_handle
+                .primary_monitor()
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "No primary monitor available".to_string())?;
+            let size = monitor.size();
+            let position = monitor.position();
+            let max_x = (size.width.saturating_sub(1)) as f64;
+            let max_y = (size.height.saturating_sub(1)) as f64;
+            let x = position.x + (x_norm.clamp(0.0, 1.0) * max_x).round() as i32;
+            let y = position.y + (y_norm.clamp(0.0, 1.0) * max_y).round() as i32;
+            enigo
+                .move_mouse(x, y, Coordinate::Abs)
+                .map_err(|e| e.to_string())?;
+        }
+        RemoteControlInputEvent::PointerDown { button } => {
+            if let Some(btn) = to_mouse_button(&button) {
+                enigo
+                    .button(btn, Direction::Press)
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        RemoteControlInputEvent::PointerUp { button } => {
+            if let Some(btn) = to_mouse_button(&button) {
+                enigo
+                    .button(btn, Direction::Release)
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        RemoteControlInputEvent::Wheel { delta_y } => {
+            let steps = (delta_y / 60.0).round() as i32;
+            if steps != 0 {
+                enigo
+                    .scroll(steps, Axis::Vertical)
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        RemoteControlInputEvent::KeyDown { key } => {
+            enigo
+                .key(to_key(&key), Direction::Press)
+                .map_err(|e| e.to_string())?;
+        }
+        RemoteControlInputEvent::KeyUp { key } => {
+            enigo
+                .key(to_key(&key), Direction::Release)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -114,7 +229,10 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![detect_running_game])
+        .invoke_handler(tauri::generate_handler![
+            detect_running_game,
+            apply_remote_control_input
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

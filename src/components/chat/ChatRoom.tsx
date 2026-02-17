@@ -10,6 +10,7 @@ import {
   Download,
   ImageIcon,
   MessageSquare,
+  Music2,
   Search,
   SmilePlus,
 } from "lucide-react";
@@ -65,12 +66,16 @@ function getErrorMessage(err: unknown): string {
   return "Download failed";
 }
 
-function getAttachmentMediaKind(attachment: MessageAttachment): "image" | "video" | "other" {
+function getAttachmentMediaKind(
+  attachment: MessageAttachment
+): "image" | "video" | "audio" | "other" {
   if (attachment.mime_type.startsWith("image/")) return "image";
   if (attachment.mime_type.startsWith("video/")) return "video";
+  if (attachment.mime_type.startsWith("audio/")) return "audio";
   const lowerName = attachment.original_name.toLowerCase();
   if (/\.(png|jpe?g|gif|webp|bmp|svg)$/.test(lowerName)) return "image";
   if (/\.(mp4|webm|mov|m4v|avi|mkv)$/.test(lowerName)) return "video";
+  if (/\.(mp3|wav|ogg|m4a|aac|flac|opus)$/.test(lowerName)) return "audio";
   return "other";
 }
 
@@ -154,13 +159,14 @@ function AttachmentCard({
   const mediaKind = getAttachmentMediaKind(attachment);
   const isImage = mediaKind === "image";
   const isVideo = mediaKind === "video";
+  const isAudio = mediaKind === "audio";
 
   useEffect(() => {
     let active = true;
     let objectUrl: string | null = null;
 
     async function loadPreview() {
-      if (!isImage && !isVideo) return;
+      if (!isImage && !isVideo && !isAudio) return;
       if (!isInternalAttachmentUrl(attachment.url)) {
         setPreviewUrl(resolveAttachmentUrl(attachment.url));
         return;
@@ -181,7 +187,7 @@ function AttachmentCard({
       active = false;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [attachment.id, attachment.url, isImage, isVideo]);
+  }, [attachment.id, attachment.url, isImage, isVideo, isAudio]);
 
   async function handleDownload() {
     setDownloadError(null);
@@ -292,6 +298,17 @@ function AttachmentCard({
           <div className="chat-attachment-placeholder">
             <MessageSquare size={14} />
             <span>{previewError ? "Preview unavailable" : "Loading video..."}</span>
+          </div>
+        )
+      ) : isAudio ? (
+        previewUrl ? (
+          <div className="chat-attachment-audio-wrap">
+            <audio src={previewUrl} controls preload="none" className="chat-attachment-audio" />
+          </div>
+        ) : (
+          <div className="chat-attachment-placeholder">
+            <Music2 size={14} />
+            <span>{previewError ? "Preview unavailable" : "Loading audio..."}</span>
           </div>
         )
       ) : (

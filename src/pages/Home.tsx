@@ -14,8 +14,24 @@ import { useAuth } from "../hooks/useAuth";
 import type { Room, RoomCategory, ServerUser, VoiceControls } from "../types";
 import { playDmNotification, playTextNotification } from "../lib/sounds";
 import { detectRunningGame } from "../lib/gamePresence";
+import { applyRemoteControlInputNative } from "../lib/remoteControlNative";
 
 type NotificationMode = "all" | "mentions" | "mute";
+type RemoteControlIncomingRequest = {
+  requestId: string;
+  roomId: string;
+  requesterUserId: string;
+  requesterUsername: string;
+  expiresAt: string;
+};
+type RemoteControlSession = {
+  sessionId: string;
+  roomId: string;
+  controllerUserId: string;
+  hostUserId: string;
+  expiresAt: string;
+  token?: string;
+};
 
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -86,10 +102,18 @@ export default function Home() {
     serverAnnouncementId?: string;
   } | null>(null);
   const lastNotificationSoundAtRef = useRef(0);
+  const lastDesktopNotificationAtRef = useRef(0);
   const lastNonCallRoomRef = useRef<Room | null>(null);
   const lastSentGameActivityRef = useRef<string | null>(null);
   const backgroundSocketsRef = useRef<Map<string, Socket>>(new Map());
   const [serverUnreadByUrl, setServerUnreadByUrl] = useState<Record<string, number>>({});
+  const [remoteControlRequest, setRemoteControlRequest] =
+    useState<RemoteControlIncomingRequest | null>(null);
+  const [remoteControlSession, setRemoteControlSession] =
+    useState<RemoteControlSession | null>(null);
+  const [remoteControlPendingHostId, setRemoteControlPendingHostId] = useState<string | null>(
+    null
+  );
   const serverHasTokenByUrl = useMemo(() => {
     const map: Record<string, boolean> = {};
     for (const server of servers) {
@@ -123,11 +147,10 @@ export default function Home() {
     }
   }, [loading, token, navigate]);
 
-  useEffect(() => {
-    let cancelled = false;
-    async function loadServerInfo() {
+  const fetchServerInfo = useCallback(
+    async (signal?: AbortSignal) => {
       try {
-        const res = await fetch(`${serverUrl}/api/server/info`);
+        const res = await fetch(`${serverUrl}/api/server/info`, { signal });
         if (!res.ok) return;
         const data = (await res.json()) as {
           name?: string;
@@ -136,7 +159,6 @@ export default function Home() {
           serverAnnouncement?: string;
           serverAnnouncementId?: string;
         };
-        if (cancelled) return;
         setServerInfo({
           name: data.name || "Server",
           maintenanceMode: Boolean(data.maintenanceMode),
@@ -144,17 +166,49 @@ export default function Home() {
           serverAnnouncement: data.serverAnnouncement || "",
           serverAnnouncementId: data.serverAnnouncementId || "",
         });
-      } catch {
-        if (!cancelled) {
-          setServerInfo((prev) => prev ?? { name: "Server", maintenanceMode: false });
-        }
+      } catch (error) {
+        if ((error as Error)?.name === "AbortError") return;
+        setServerInfo((prev) => prev ?? { name: "Server", maintenanceMode: false });
       }
-    }
-    void loadServerInfo();
+    },
+    [serverUrl]
+  );
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void fetchServerInfo(controller.signal);
     return () => {
-      cancelled = true;
+      controller.abort();
     };
-  }, [serverUrl]);
+  }, [fetchServerInfo]);
+
+  useEffect(() => {
+    if (!token) return;
+
+    const refresh = () => {
+      void fetchServerInfo();
+    };
+
+    const intervalId = window.setInterval(refresh, 60000);
+    const onFocus = () => refresh();
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [token, fetchServerInfo]);
+
+  useEffect(() => {
+    if (!isConnected) return;
+    void fetchServerInfo();
+  }, [isConnected, fetchServerInfo]);
 
   // Identify user to server when connected
   useEffect(() => {
@@ -474,6 +528,166 @@ export default function Home() {
     );
   }, [isConnected, socket, user?.id]);
 
+  useEffect(() => {
+    if (!isConnected || !user?.id) return;
+    socket.emit(
+      "remote-control:list",
+      (ack?: {
+        ok: boolean;
+        sessions?: RemoteControlSession[];
+      }) => {
+        if (!ack?.ok || !ack.sessions?.length) {
+          setRemoteControlSession(null);
+          return;
+        }
+        setRemoteControlSession(ack.sessions[0] ?? null);
+      }
+    );
+  }, [isConnected, socket, user?.id]);
+
+  useEffect(() => {
+    if (!isConnected) return;
+
+    function onRemoteControlRequest(payload: RemoteControlIncomingRequest) {
+      setRemoteControlRequest(payload);
+    }
+    function onRemoteControlRequestCancelled(payload: { requestId: string }) {
+      setRemoteControlRequest((prev) =>
+        prev?.requestId === payload.requestId ? null : prev
+      );
+    }
+    function onRemoteControlRequestDenied() {
+      setRemoteControlPendingHostId(null);
+      window.alert("Remote control request was denied or expired.");
+    }
+    function onRemoteControlSessionStarted(payload: RemoteControlSession) {
+      setRemoteControlSession(payload);
+      setRemoteControlPendingHostId(null);
+      if (payload.controllerUserId === user?.id) {
+        window.alert("Remote control access granted.");
+      }
+    }
+    function onRemoteControlSessionEnded(payload: {
+      sessionId: string;
+      reason: string;
+    }) {
+      setRemoteControlSession((prev) =>
+        prev?.sessionId === payload.sessionId ? null : prev
+      );
+      if (payload.reason === "expired") {
+        window.alert("Remote control session expired.");
+      }
+    }
+    async function onRemoteControlInput(payload: {
+      sessionId: string;
+      token: string;
+      event: {
+        type: "pointer_move" | "pointer_down" | "pointer_up" | "wheel" | "key_down" | "key_up";
+        xNorm?: number;
+        yNorm?: number;
+        button?: "left" | "right" | "middle";
+        deltaY?: number;
+        key?: string;
+      };
+      fromUserId: string;
+    }) {
+      if (!payload?.sessionId || !payload?.event) return;
+      const current = remoteControlSession;
+      if (!current || current.sessionId !== payload.sessionId) return;
+      if (current.hostUserId !== user?.id) return;
+      if (current.token && payload.token !== current.token) return;
+      try {
+        await applyRemoteControlInputNative(payload.event);
+      } catch {
+        // Ignore injection errors on unsupported host platforms.
+      }
+    }
+
+    socket.on("remote-control:request", onRemoteControlRequest);
+    socket.on("remote-control:request-cancelled", onRemoteControlRequestCancelled);
+    socket.on("remote-control:request-denied", onRemoteControlRequestDenied);
+    socket.on("remote-control:session-started", onRemoteControlSessionStarted);
+    socket.on("remote-control:session-ended", onRemoteControlSessionEnded);
+    socket.on("remote-control:input", onRemoteControlInput);
+    return () => {
+      socket.off("remote-control:request", onRemoteControlRequest);
+      socket.off("remote-control:request-cancelled", onRemoteControlRequestCancelled);
+      socket.off("remote-control:request-denied", onRemoteControlRequestDenied);
+      socket.off("remote-control:session-started", onRemoteControlSessionStarted);
+      socket.off("remote-control:session-ended", onRemoteControlSessionEnded);
+      socket.off("remote-control:input", onRemoteControlInput);
+    };
+  }, [isConnected, socket, user?.id, remoteControlSession]);
+
+  const requestScreenControl = useCallback(
+    (hostUserId: string, roomId: string) => {
+      if (!roomId) return;
+      setRemoteControlPendingHostId(hostUserId);
+      socket.emit(
+        "remote-control:request",
+        { roomId, targetUserId: hostUserId },
+        (ack?: { ok: boolean; error?: string }) => {
+          if (!ack?.ok) {
+            setRemoteControlPendingHostId(null);
+            window.alert(ack?.error || "Failed to request control");
+          }
+        }
+      );
+    },
+    [socket]
+  );
+
+  const respondScreenControl = useCallback(
+    (approve: boolean) => {
+      if (!remoteControlRequest) return;
+      socket.emit(
+        "remote-control:respond",
+        { requestId: remoteControlRequest.requestId, approve },
+        (ack?: { ok: boolean; error?: string }) => {
+          if (!ack?.ok) {
+            window.alert(ack?.error || "Failed to respond to request");
+          }
+          setRemoteControlRequest(null);
+        }
+      );
+    },
+    [remoteControlRequest, socket]
+  );
+
+  const revokeScreenControl = useCallback(
+    (sessionId: string) => {
+      socket.emit(
+        "remote-control:revoke",
+        { sessionId },
+        (ack?: { ok: boolean; error?: string }) => {
+          if (!ack?.ok) {
+            window.alert(ack?.error || "Failed to revoke control session");
+          }
+        }
+      );
+    },
+    [socket]
+  );
+
+  const sendRemoteControlInput = useCallback(
+    (event: {
+      type: "pointer_move" | "pointer_down" | "pointer_up" | "wheel" | "key_down" | "key_up";
+      xNorm?: number;
+      yNorm?: number;
+      button?: "left" | "right" | "middle";
+      deltaY?: number;
+      key?: string;
+    }) => {
+      if (!remoteControlSession?.sessionId || !remoteControlSession?.token) return;
+      socket.emit("remote-control:input", {
+        sessionId: remoteControlSession.sessionId,
+        token: remoteControlSession.token,
+        event,
+      });
+    },
+    [socket, remoteControlSession]
+  );
+
   const handleSelectRoom = useCallback(
     (room: Room) => {
       if (
@@ -602,9 +816,20 @@ export default function Home() {
         dmRooms.find((entry) => entry.id === payload.room_id);
       const notificationMode = notificationModesByRoom[payload.room_id] ?? "all";
       const mentioned = hasUserMention(payload.content, profile.username);
-      const shouldPlaySound =
+      const shouldNotifyByRoom =
         notificationMode === "all" ||
         (notificationMode === "mentions" && mentioned);
+      const shouldPlaySound = shouldNotifyByRoom;
+      const shouldDesktopNotifyByProfile =
+        !profile.desktopNotificationsMentionsOnly || mentioned || room?.type === "dm";
+      const canDesktopNotify =
+        shouldNotifyByRoom &&
+        profile.desktopNotificationsEnabled &&
+        shouldDesktopNotifyByProfile &&
+        typeof window !== "undefined" &&
+        "Notification" in window &&
+        Notification.permission === "granted" &&
+        document.visibilityState !== "visible";
 
       if (shouldPlaySound) {
         const now = Date.now();
@@ -612,6 +837,26 @@ export default function Home() {
           if (room?.type === "dm") playDmNotification();
           else playTextNotification();
           lastNotificationSoundAtRef.current = now;
+        }
+      }
+
+      if (canDesktopNotify) {
+        const now = Date.now();
+        if (now - lastDesktopNotificationAtRef.current > 750) {
+          const title = room?.type === "dm" ? "New direct message" : `#${room?.name || "channel"}`;
+          const body = `${payload.content || "(attachment)"}`.trim().slice(0, 180);
+          const notification = new Notification(title, {
+            body,
+            tag: `room:${payload.room_id}`,
+          });
+          notification.onclick = () => {
+            try {
+              window.focus();
+            } catch {
+              // no-op
+            }
+          };
+          lastDesktopNotificationAtRef.current = now;
         }
       }
 
@@ -646,6 +891,8 @@ export default function Home() {
     rooms,
     dmRooms,
     notificationModesByRoom,
+    profile.desktopNotificationsEnabled,
+    profile.desktopNotificationsMentionsOnly,
   ]);
 
   useEffect(() => {
@@ -914,6 +1161,16 @@ export default function Home() {
                   onParticipantsChange={handleParticipantsChange}
                   autoJoin={pendingAutoJoinVoiceRoomId === voiceSessionRoom.id}
                   onVoiceControlsChange={handleVoiceControlsChange}
+                  currentUserId={user?.id ?? null}
+                  remoteControlSession={
+                    remoteControlSession?.roomId === voiceSessionRoom.id
+                      ? remoteControlSession
+                      : null
+                  }
+                  remoteControlPendingHostId={remoteControlPendingHostId}
+                  onRequestScreenControl={requestScreenControl}
+                  onRevokeScreenControl={revokeScreenControl}
+                  onSendRemoteControlInput={sendRemoteControlInput}
                 />
               </div>
             )}
@@ -1002,6 +1259,41 @@ export default function Home() {
                 }
           }
         />
+      )}
+      {remoteControlRequest && (
+        <div className="public-profile-backdrop">
+          <div className="public-profile-modal" style={{ maxWidth: 460 }}>
+            <div className="public-profile-header">
+              <h2>Remote Control Request</h2>
+            </div>
+            <div className="public-profile-body" style={{ gap: 14 }}>
+              <p style={{ margin: 0, color: "var(--text-secondary)" }}>
+                <strong>{remoteControlRequest.requesterUsername}</strong> is requesting
+                control of your shared screen.
+              </p>
+              <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 13 }}>
+                Only approve if you trust this user. You can stop control anytime with Kill
+                Switch.
+              </p>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+                <button
+                  type="button"
+                  className="profile-button secondary"
+                  onClick={() => respondScreenControl(false)}
+                >
+                  Deny
+                </button>
+                <button
+                  type="button"
+                  className="profile-button"
+                  onClick={() => respondScreenControl(true)}
+                >
+                  Allow
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

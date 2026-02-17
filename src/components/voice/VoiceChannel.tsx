@@ -34,6 +34,25 @@ interface VoiceChannelProps {
   autoJoin?: boolean;
   onParticipantsChange?: (roomId: string, participants: VoiceParticipant[]) => void;
   onVoiceControlsChange?: (roomId: string, controls: VoiceControls | null) => void;
+  currentUserId?: string | null;
+  remoteControlSession?: {
+    sessionId: string;
+    roomId: string;
+    controllerUserId: string;
+    hostUserId: string;
+    expiresAt: string;
+  } | null;
+  remoteControlPendingHostId?: string | null;
+  onRequestScreenControl?: (hostUserId: string, roomId: string) => void;
+  onRevokeScreenControl?: (sessionId: string) => void;
+  onSendRemoteControlInput?: (event: {
+    type: "pointer_move" | "pointer_down" | "pointer_up" | "wheel" | "key_down" | "key_up";
+    xNorm?: number;
+    yNorm?: number;
+    button?: "left" | "right" | "middle";
+    deltaY?: number;
+    key?: string;
+  }) => void;
 }
 
 interface VoiceParticipant {
@@ -57,6 +76,12 @@ function VoiceRoomContent({
   mediaLimits,
   onParticipantsChange,
   onVoiceControlsChange,
+  currentUserId,
+  remoteControlSession,
+  remoteControlPendingHostId,
+  onRequestScreenControl,
+  onRevokeScreenControl,
+  onSendRemoteControlInput,
 }: {
   onLeave: () => void;
   pushToTalkEnabled: boolean;
@@ -72,6 +97,25 @@ function VoiceRoomContent({
   mediaLimits: MediaLimits;
   onParticipantsChange?: (roomId: string, participants: VoiceParticipant[]) => void;
   onVoiceControlsChange?: (roomId: string, controls: VoiceControls | null) => void;
+  currentUserId?: string | null;
+  remoteControlSession?: {
+    sessionId: string;
+    roomId: string;
+    controllerUserId: string;
+    hostUserId: string;
+    expiresAt: string;
+  } | null;
+  remoteControlPendingHostId?: string | null;
+  onRequestScreenControl?: (hostUserId: string, roomId: string) => void;
+  onRevokeScreenControl?: (sessionId: string) => void;
+  onSendRemoteControlInput?: (event: {
+    type: "pointer_move" | "pointer_down" | "pointer_up" | "wheel" | "key_down" | "key_up";
+    xNorm?: number;
+    yNorm?: number;
+    button?: "left" | "right" | "middle";
+    deltaY?: number;
+    key?: string;
+  }) => void;
 }) {
   const room = useRoomContext();
   const { isCameraEnabled } = useLocalParticipant();
@@ -793,16 +837,60 @@ function VoiceRoomContent({
   // Grid columns for equal-size mode
   const tileCount = tiles.length;
   const columns = tileCount <= 1 ? 1 : tileCount <= 4 ? 2 : tileCount <= 9 ? 3 : 4;
+  const isController =
+    Boolean(remoteControlSession) &&
+    remoteControlSession!.controllerUserId === currentUserId;
+
+  useEffect(() => {
+    if (!isController || !onSendRemoteControlInput) return;
+    const sendInput = onSendRemoteControlInput;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.repeat) return;
+      sendInput({ type: "key_down", key: event.key });
+    }
+    function onKeyUp(event: KeyboardEvent) {
+      sendInput({ type: "key_up", key: event.key });
+    }
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+    };
+  }, [isController, onSendRemoteControlInput]);
 
   return (
     <div className="voice-room">
       <RoomAudioRenderer />
+      {remoteControlSession && (
+        <div className="voice-ptt" style={{ marginBottom: 8 }}>
+          Remote control active (
+          {remoteControlSession.hostUserId === currentUserId ? "you are sharing control" : "you have control access"})
+          <button
+            type="button"
+            className="voice-btn danger"
+            style={{ marginLeft: 10, padding: "4px 8px", fontSize: 12 }}
+            onClick={() => onRevokeScreenControl?.(remoteControlSession.sessionId)}
+          >
+            Kill Switch
+          </button>
+        </div>
+      )}
 
       {focusedTile ? (
         /* Focused layout: one big tile + strip at bottom */
         <>
           <div className="voice-focused-main" onClick={() => handleTileClick(focusedTile.key)}>
-            <TileContent tile={focusedTile} />
+            <TileContent
+              tile={focusedTile}
+              currentUserId={currentUserId}
+              remoteControlSession={remoteControlSession}
+              remoteControlPendingHostId={remoteControlPendingHostId}
+              roomId={roomId}
+              onRequestScreenControl={onRequestScreenControl}
+              onRevokeScreenControl={onRevokeScreenControl}
+              onSendRemoteControlInput={onSendRemoteControlInput}
+            />
           </div>
           {otherTiles.length > 0 && (
             <div className="voice-focused-strip">
@@ -812,7 +900,16 @@ function VoiceRoomContent({
                   className="voice-focused-strip-item"
                   onClick={() => handleTileClick(tile.key)}
                 >
-                  <TileContent tile={tile} />
+                  <TileContent
+                    tile={tile}
+                    currentUserId={currentUserId}
+                    remoteControlSession={remoteControlSession}
+                    remoteControlPendingHostId={remoteControlPendingHostId}
+                    roomId={roomId}
+                    onRequestScreenControl={onRequestScreenControl}
+                    onRevokeScreenControl={onRevokeScreenControl}
+                    onSendRemoteControlInput={onSendRemoteControlInput}
+                  />
                 </div>
               ))}
             </div>
@@ -830,7 +927,16 @@ function VoiceRoomContent({
               className={`voice-tile-wrapper ${tileCount === 1 ? "no-enter" : ""}`}
               onClick={() => handleTileClick(tile.key)}
             >
-              <TileContent tile={tile} />
+              <TileContent
+                tile={tile}
+                currentUserId={currentUserId}
+                remoteControlSession={remoteControlSession}
+                remoteControlPendingHostId={remoteControlPendingHostId}
+                roomId={roomId}
+                onRequestScreenControl={onRequestScreenControl}
+                onRevokeScreenControl={onRevokeScreenControl}
+                onSendRemoteControlInput={onSendRemoteControlInput}
+              />
             </div>
           ))}
         </div>
@@ -884,17 +990,113 @@ function VoiceRoomContent({
 /** Renders the inside of a tile — either a participant camera or a screen share */
 function TileContent({
   tile,
+  currentUserId,
+  remoteControlSession,
+  remoteControlPendingHostId,
+  roomId,
+  onRequestScreenControl,
+  onRevokeScreenControl,
+  onSendRemoteControlInput,
 }: {
   tile:
     | { kind: "participant"; participant: ReturnType<typeof useParticipants>[number]; key: string }
     | { kind: "screen"; trackRef: any; participant: ReturnType<typeof useParticipants>[number]; key: string };
+  currentUserId?: string | null;
+  remoteControlSession?: {
+    sessionId: string;
+    roomId: string;
+    controllerUserId: string;
+    hostUserId: string;
+    expiresAt: string;
+  } | null;
+  remoteControlPendingHostId?: string | null;
+  roomId: string;
+  onRequestScreenControl?: (hostUserId: string, roomId: string) => void;
+  onRevokeScreenControl?: (sessionId: string) => void;
+  onSendRemoteControlInput?: (event: {
+    type: "pointer_move" | "pointer_down" | "pointer_up" | "wheel" | "key_down" | "key_up";
+    xNorm?: number;
+    yNorm?: number;
+    button?: "left" | "right" | "middle";
+    deltaY?: number;
+    key?: string;
+  }) => void;
 }) {
   if (tile.kind === "screen") {
     const name = tile.participant.name || tile.participant.identity;
+    const hostUserId = tile.participant.identity;
+    const isHost = currentUserId === hostUserId;
+    const hasActiveSessionForHost =
+      remoteControlSession &&
+      remoteControlSession.hostUserId === hostUserId;
+    const isControllerForHost =
+      hasActiveSessionForHost &&
+      remoteControlSession!.controllerUserId === currentUserId;
+    const pending = remoteControlPendingHostId === hostUserId;
+    const canSendInput = Boolean(isControllerForHost && onSendRemoteControlInput);
     return (
       <div className="voice-tile screen">
         <VideoTrack trackRef={tile.trackRef} className="voice-tile-video" />
         <div className="voice-tile-name">{name}'s screen</div>
+        {canSendInput && (
+          <div
+            style={{ position: "absolute", inset: 0, cursor: "crosshair" }}
+            onMouseMove={(e) => {
+              const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
+              const xNorm = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 0;
+              const yNorm = rect.height > 0 ? (e.clientY - rect.top) / rect.height : 0;
+              onSendRemoteControlInput?.({
+                type: "pointer_move",
+                xNorm: Math.min(1, Math.max(0, xNorm)),
+                yNorm: Math.min(1, Math.max(0, yNorm)),
+              });
+            }}
+            onMouseDown={(e) => {
+              const button =
+                e.button === 2 ? "right" : e.button === 1 ? "middle" : "left";
+              onSendRemoteControlInput?.({ type: "pointer_down", button });
+            }}
+            onMouseUp={(e) => {
+              const button =
+                e.button === 2 ? "right" : e.button === 1 ? "middle" : "left";
+              onSendRemoteControlInput?.({ type: "pointer_up", button });
+            }}
+            onWheel={(e) => {
+              onSendRemoteControlInput?.({ type: "wheel", deltaY: e.deltaY });
+            }}
+            onContextMenu={(e) => e.preventDefault()}
+          />
+        )}
+        {!isHost && (
+          <div style={{ position: "absolute", top: 8, right: 8, display: "flex", gap: 6 }}>
+            {isControllerForHost ? (
+              <button
+                type="button"
+                className="voice-btn danger"
+                style={{ padding: "4px 8px", fontSize: 12 }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onRevokeScreenControl?.(remoteControlSession!.sessionId);
+                }}
+              >
+                Stop Control
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="voice-btn primary"
+                style={{ padding: "4px 8px", fontSize: 12 }}
+                disabled={pending || Boolean(hasActiveSessionForHost)}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onRequestScreenControl?.(hostUserId, roomId);
+                }}
+              >
+                {pending ? "Requesting..." : "Request Control"}
+              </button>
+            )}
+          </div>
+        )}
       </div>
     );
   }
@@ -961,6 +1163,12 @@ export default function VoiceChannel({
   autoJoin = false,
   onParticipantsChange,
   onVoiceControlsChange,
+  currentUserId,
+  remoteControlSession,
+  remoteControlPendingHostId,
+  onRequestScreenControl,
+  onRevokeScreenControl,
+  onSendRemoteControlInput,
 }: VoiceChannelProps) {
   const { user, profile } = useAuth();
   const [token, setToken] = useState<string | null>(null);
@@ -1080,6 +1288,12 @@ export default function VoiceChannel({
               mediaLimits={mediaLimits}
               onParticipantsChange={onParticipantsChange}
               onVoiceControlsChange={onVoiceControlsChange}
+              currentUserId={currentUserId}
+              remoteControlSession={remoteControlSession}
+              remoteControlPendingHostId={remoteControlPendingHostId}
+              onRequestScreenControl={onRequestScreenControl}
+              onRevokeScreenControl={onRevokeScreenControl}
+              onSendRemoteControlInput={onSendRemoteControlInput}
             />
           </LiveKitRoom>
         )}

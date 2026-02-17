@@ -39,6 +39,8 @@ interface Profile {
   status: "online" | "offline" | "away" | "dnd";
   avatarUrl: string;
   about: string;
+  desktopNotificationsEnabled: boolean;
+  desktopNotificationsMentionsOnly: boolean;
   pushToTalkEnabled: boolean;
   pushToMuteEnabled: boolean;
   pushToTalkKey: string;
@@ -80,6 +82,11 @@ interface AuthContext {
     username: string,
     inviteCode?: string
   ) => Promise<{ error: string | null }>;
+  requestPasswordReset: (email: string) => Promise<{ error: string | null; message?: string }>;
+  confirmPasswordReset: (
+    token: string,
+    newPassword: string
+  ) => Promise<{ error: string | null }>;
   updateProfile: (profile: Profile) => Promise<{ error: string | null }>;
   signOut: () => Promise<void>;
 }
@@ -89,6 +96,8 @@ const DEFAULT_PROFILE: Profile = {
   status: "online",
   avatarUrl: "",
   about: "",
+  desktopNotificationsEnabled: false,
+  desktopNotificationsMentionsOnly: true,
   pushToTalkEnabled: false,
   pushToMuteEnabled: false,
   pushToTalkKey: "Space",
@@ -137,6 +146,11 @@ function mapServerProfile(data: Record<string, any>): Profile {
     status: (data.status as Profile["status"]) || "online",
     avatarUrl: data.avatar_url || "",
     about: data.about || "",
+    desktopNotificationsEnabled: Boolean(data.desktop_notifications_enabled),
+    desktopNotificationsMentionsOnly:
+      data.desktop_notifications_mentions_only === undefined
+        ? true
+        : Boolean(data.desktop_notifications_mentions_only),
     pushToTalkEnabled: Boolean(data.push_to_talk_enabled),
     pushToMuteEnabled: Boolean(data.push_to_mute_enabled),
     pushToTalkKey: data.push_to_talk_key || "Space",
@@ -473,6 +487,42 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }
 
+  async function requestPasswordReset(email: string) {
+    try {
+      const res = await apiFetch("/api/auth/password-reset/request", {
+        method: "POST",
+        body: JSON.stringify({ email }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        return { error: data.error || "Failed to request password reset" };
+      }
+      return { error: null, message: data.message || "" };
+    } catch (err) {
+      return {
+        error: err instanceof Error ? err.message : "Connection failed",
+      };
+    }
+  }
+
+  async function confirmPasswordReset(resetToken: string, newPassword: string) {
+    try {
+      const res = await apiFetch("/api/auth/password-reset/confirm", {
+        method: "POST",
+        body: JSON.stringify({ token: resetToken, newPassword }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        return { error: data.error || "Failed to reset password" };
+      }
+      return { error: null };
+    } catch (err) {
+      return {
+        error: err instanceof Error ? err.message : "Connection failed",
+      };
+    }
+  }
+
   async function updateProfileFn(update: Profile) {
     if (!user) {
       return { error: "Not authenticated." };
@@ -486,6 +536,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           status: update.status,
           avatar_url: update.avatarUrl.trim(),
           about: update.about.trim(),
+          desktop_notifications_enabled: update.desktopNotificationsEnabled ? 1 : 0,
+          desktop_notifications_mentions_only: update.desktopNotificationsMentionsOnly ? 1 : 0,
           push_to_talk_enabled: update.pushToTalkEnabled ? 1 : 0,
           push_to_mute_enabled: update.pushToMuteEnabled ? 1 : 0,
           push_to_talk_key: update.pushToTalkKey.trim() || "Space",
@@ -609,6 +661,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         signInWithPassword,
         signInWithTwoFactor,
         signUp,
+        requestPasswordReset,
+        confirmPasswordReset,
         updateProfile: updateProfileFn,
         signOut,
       }}

@@ -1,12 +1,13 @@
 import { useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Minus, RefreshCw, Square, X } from "lucide-react";
+import { Bug, Minus, RefreshCw, Square, X } from "lucide-react";
 
 const appWindow = getCurrentWindow();
 
 export default function TitleBar() {
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [updateStatus, setUpdateStatus] = useState("");
+  const [showIssueConfirm, setShowIssueConfirm] = useState(false);
   const [updateStatusKind, setUpdateStatusKind] = useState<
     "info" | "success" | "error"
   >("info");
@@ -65,56 +66,103 @@ export default function TitleBar() {
     }
   }
 
+  async function openIssuePage() {
+    const url = "https://github.com/Sciphr/chitchat/issues";
+    try {
+      const { openUrl } = await import("@tauri-apps/plugin-opener");
+      await openUrl(url);
+    } catch {
+      window.open(url, "_blank", "noopener,noreferrer");
+    } finally {
+      setShowIssueConfirm(false);
+    }
+  }
+
   return (
-    <div className="titlebar" data-tauri-drag-region>
-      <div className="titlebar-title" data-tauri-drag-region>
-        ChitChat
-      </div>
-      {updateStatus && (
-        <div
-          className={`titlebar-status ${updateStatusKind}`}
-          data-tauri-drag-region
-        >
-          {updateStatus}
+    <>
+      <div className="titlebar" data-tauri-drag-region>
+        <div className="titlebar-title" data-tauri-drag-region>
+          ChitChat
         </div>
-      )}
-      <div className="titlebar-controls">
-        {isDesktop && (
+        {updateStatus && (
+          <div
+            className={`titlebar-status ${updateStatusKind}`}
+            data-tauri-drag-region
+          >
+            {updateStatus}
+          </div>
+        )}
+        <div className="titlebar-controls">
+          <button
+            className="titlebar-btn titlebar-btn-issue"
+            onClick={() => setShowIssueConfirm(true)}
+            aria-label="Report an issue"
+            title="Report an issue"
+          >
+            <Bug size={14} />
+          </button>
+          {isDesktop && (
+            <button
+              className="titlebar-btn"
+              onClick={handleCheckForUpdates}
+              disabled={checkingUpdate}
+              aria-label="Check for updates"
+              title={checkingUpdate ? "Checking for updates..." : "Check for updates"}
+            >
+              <RefreshCw
+                size={14}
+                className={checkingUpdate ? "titlebar-btn-spin" : undefined}
+              />
+            </button>
+          )}
           <button
             className="titlebar-btn"
-            onClick={handleCheckForUpdates}
-            disabled={checkingUpdate}
-            aria-label="Check for updates"
-            title={checkingUpdate ? "Checking for updates..." : "Check for updates"}
+            onClick={() => appWindow.minimize()}
+            aria-label="Minimize"
           >
-            <RefreshCw
-              size={14}
-              className={checkingUpdate ? "titlebar-btn-spin" : undefined}
-            />
+            <Minus size={14} />
           </button>
-        )}
-        <button
-          className="titlebar-btn"
-          onClick={() => appWindow.minimize()}
-          aria-label="Minimize"
-        >
-          <Minus size={14} />
-        </button>
-        <button
-          className="titlebar-btn"
-          onClick={() => appWindow.toggleMaximize()}
-          aria-label="Maximize"
-        >
-          <Square size={12} />
-        </button>
-        <button
-          className="titlebar-btn titlebar-btn-close"
-          onClick={() => appWindow.close()}
-          aria-label="Close"
-        >
-          <X size={14} />
-        </button>
+          <button
+            className="titlebar-btn"
+            onClick={() => appWindow.toggleMaximize()}
+            aria-label="Maximize"
+          >
+            <Square size={12} />
+          </button>
+          <button
+            className="titlebar-btn titlebar-btn-close"
+            onClick={() => appWindow.close()}
+            aria-label="Close"
+          >
+            <X size={14} />
+          </button>
+        </div>
       </div>
-    </div>
+
+      {showIssueConfirm && (
+        <div className="titlebar-modal-overlay" onClick={() => setShowIssueConfirm(false)}>
+          <div className="titlebar-modal" onClick={(event) => event.stopPropagation()}>
+            <h3>Open GitHub Issues?</h3>
+            <p>
+              This will open your browser to the ChitChat issues page so you can report a bug.
+            </p>
+            <div className="titlebar-modal-actions">
+              <button
+                className="titlebar-modal-btn titlebar-modal-btn-cancel"
+                onClick={() => setShowIssueConfirm(false)}
+              >
+                Cancel
+              </button>
+              <button
+                className="titlebar-modal-btn titlebar-modal-btn-primary"
+                onClick={openIssuePage}
+              >
+                Continue
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }

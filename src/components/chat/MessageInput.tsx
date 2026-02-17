@@ -59,6 +59,7 @@ export default function MessageInput({
   const [activeMention, setActiveMention] = useState<ActiveMention | null>(null);
   const [mentionMenuIndex, setMentionMenuIndex] = useState(0);
   const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
+  const [dragActive, setDragActive] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const messageInputRef = useRef<HTMLInputElement | null>(null);
   const activeUploadRequestRef = useRef<XMLHttpRequest | null>(null);
@@ -258,6 +259,11 @@ export default function MessageInput({
     setEmojiPickerOpen(false);
   }
 
+  function addFiles(files: File[]) {
+    if (files.length === 0) return;
+    setSelectedFiles((prev) => [...prev, ...files]);
+  }
+
   return (
     <div className="border-t border-[var(--border)] bg-[var(--bg-secondary)]/60 chat-input">
       {replyTo && (
@@ -310,7 +316,33 @@ export default function MessageInput({
 
       <form
         onSubmit={handleSubmit}
-        className="flex items-center gap-3 px-10 py-4 chat-input-main"
+        className={`flex items-center gap-3 px-10 py-4 chat-input-main ${dragActive ? "drag-active" : ""}`}
+        onDragEnter={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          setDragActive(true);
+        }}
+        onDragOver={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          if (!dragActive) setDragActive(true);
+        }}
+        onDragLeave={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const relatedTarget = e.relatedTarget as Node | null;
+          if (!relatedTarget || !e.currentTarget.contains(relatedTarget)) {
+            setDragActive(false);
+          }
+        }}
+        onDrop={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          setDragActive(false);
+          if (disabled || uploading) return;
+          const files = Array.from(e.dataTransfer.files || []);
+          addFiles(files);
+        }}
       >
         <input
           ref={fileInputRef}
@@ -320,7 +352,7 @@ export default function MessageInput({
           onChange={(e) => {
             const files = Array.from(e.target.files || []);
             if (files.length === 0) return;
-            setSelectedFiles((prev) => [...prev, ...files]);
+            addFiles(files);
             e.currentTarget.value = "";
           }}
         />

@@ -54,6 +54,8 @@ export default function Settings({ onClose }: SettingsProps) {
     status: profile.status,
     avatarUrl: profile.avatarUrl,
     about: profile.about,
+    desktopNotificationsEnabled: profile.desktopNotificationsEnabled,
+    desktopNotificationsMentionsOnly: profile.desktopNotificationsMentionsOnly,
     pushToTalkEnabled: profile.pushToTalkEnabled,
     pushToMuteEnabled: profile.pushToMuteEnabled,
     pushToTalkKey: profile.pushToTalkKey,
@@ -69,13 +71,21 @@ export default function Settings({ onClose }: SettingsProps) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [notificationPermission, setNotificationPermission] = useState<
+    NotificationPermission | "unsupported"
+  >(() => {
+    if (typeof window === "undefined" || !("Notification" in window)) {
+      return "unsupported";
+    }
+    return Notification.permission;
+  });
   const [capturingKey, setCapturingKey] = useState(false);
   const [activeTheme, setActiveTheme] = useState(getTheme);
   const [activeTab, setActiveTab] = useState<"settings" | "public-profile">(
     "settings"
   );
   const [activeSettingsSection, setActiveSettingsSection] = useState<
-    "identity" | "appearance" | "voice" | "security" | "about"
+    "identity" | "appearance" | "notifications" | "voice" | "security" | "about"
   >("identity");
   const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([]);
   const [audioOutputs, setAudioOutputs] = useState<MediaDeviceInfo[]>([]);
@@ -108,6 +118,14 @@ export default function Settings({ onClose }: SettingsProps) {
     STATUS_STYLES[profile.status] || STATUS_STYLES.online;
 
   useEffect(() => {
+    if (typeof window === "undefined" || !("Notification" in window)) {
+      setNotificationPermission("unsupported");
+      return;
+    }
+    setNotificationPermission(Notification.permission);
+  }, []);
+
+  useEffect(() => {
     setTwoFactorEnabled(profile.twoFactorEnabled);
   }, [profile.twoFactorEnabled]);
 
@@ -117,6 +135,8 @@ export default function Settings({ onClose }: SettingsProps) {
       status: profile.status,
       avatarUrl: profile.avatarUrl,
       about: profile.about,
+      desktopNotificationsEnabled: profile.desktopNotificationsEnabled,
+      desktopNotificationsMentionsOnly: profile.desktopNotificationsMentionsOnly,
       pushToTalkEnabled: profile.pushToTalkEnabled,
       pushToMuteEnabled: profile.pushToMuteEnabled,
       pushToTalkKey: profile.pushToTalkKey,
@@ -134,6 +154,8 @@ export default function Settings({ onClose }: SettingsProps) {
     profile.status,
     profile.avatarUrl,
     profile.about,
+    profile.desktopNotificationsEnabled,
+    profile.desktopNotificationsMentionsOnly,
     profile.pushToTalkEnabled,
     profile.pushToMuteEnabled,
     profile.pushToTalkKey,
@@ -163,6 +185,8 @@ export default function Settings({ onClose }: SettingsProps) {
       status: form.status,
       avatarUrl: form.avatarUrl,
       about: form.about,
+      desktopNotificationsEnabled: form.desktopNotificationsEnabled,
+      desktopNotificationsMentionsOnly: form.desktopNotificationsMentionsOnly,
       pushToTalkEnabled: form.pushToTalkEnabled,
       pushToMuteEnabled: form.pushToMuteEnabled,
       pushToTalkKey: form.pushToTalkKey,
@@ -274,12 +298,35 @@ export default function Settings({ onClose }: SettingsProps) {
     await saveProfile();
   }
 
+  async function requestDesktopNotificationPermission() {
+    if (typeof window === "undefined" || !("Notification" in window)) {
+      setError("Desktop notifications are not supported on this platform.");
+      return;
+    }
+    try {
+      const permission = await Notification.requestPermission();
+      setNotificationPermission(permission);
+      if (permission !== "granted") {
+        setError(
+          "Desktop notification permission was not granted. You can enable it later in system/browser settings."
+        );
+      } else {
+        setError("");
+        setSuccess("Desktop notification permission granted.");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to request notification permission");
+    }
+  }
+
   function handleReset() {
     setForm({
       username: profile.username,
       status: profile.status,
       avatarUrl: profile.avatarUrl,
       about: profile.about,
+      desktopNotificationsEnabled: profile.desktopNotificationsEnabled,
+      desktopNotificationsMentionsOnly: profile.desktopNotificationsMentionsOnly,
       pushToTalkEnabled: profile.pushToTalkEnabled,
       pushToMuteEnabled: profile.pushToMuteEnabled,
       pushToTalkKey: profile.pushToTalkKey,
@@ -722,6 +769,13 @@ export default function Settings({ onClose }: SettingsProps) {
                   </button>
                   <button
                     type="button"
+                    className={`settings-tab ${activeSettingsSection === "notifications" ? "active" : ""}`}
+                    onClick={() => setActiveSettingsSection("notifications")}
+                  >
+                    Notifications
+                  </button>
+                  <button
+                    type="button"
                     className={`settings-tab ${activeSettingsSection === "voice" ? "active" : ""}`}
                     onClick={() => setActiveSettingsSection("voice")}
                   >
@@ -824,6 +878,69 @@ export default function Settings({ onClose }: SettingsProps) {
                           <span className="theme-swatch-label">{t.label}</span>
                         </button>
                       ))}
+                    </div>
+                  </div>
+                </div>
+                )}
+
+                {activeSettingsSection === "notifications" && (
+                <div className="profile-section">
+                  <div className="profile-section-title">Notifications</div>
+                  <div className="profile-grid">
+                    <div>
+                      <label className="profile-label">Desktop notifications</label>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setForm((prev) => ({
+                            ...prev,
+                            desktopNotificationsEnabled: !prev.desktopNotificationsEnabled,
+                          }))
+                        }
+                        className={`ptt-toggle ${
+                          form.desktopNotificationsEnabled ? "active" : ""
+                        }`}
+                      >
+                        {form.desktopNotificationsEnabled ? "Enabled" : "Disabled"}
+                      </button>
+                    </div>
+                    <div>
+                      <label className="profile-label">Desktop notify mode</label>
+                      <select
+                        className="profile-select"
+                        value={form.desktopNotificationsMentionsOnly ? "mentions" : "all"}
+                        onChange={(e) =>
+                          setForm((prev) => ({
+                            ...prev,
+                            desktopNotificationsMentionsOnly: e.target.value === "mentions",
+                          }))
+                        }
+                      >
+                        <option value="mentions">Mentions + DMs</option>
+                        <option value="all">All messages + DMs</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div style={{ marginTop: 12 }}>
+                    <label className="profile-label">OS permission</label>
+                    <div className="profile-device-row">
+                      <span className="text-xs text-[var(--text-muted)]">
+                        {notificationPermission === "unsupported"
+                          ? "Not supported on this platform"
+                          : notificationPermission === "granted"
+                            ? "Granted"
+                            : notificationPermission === "denied"
+                              ? "Denied"
+                              : "Not requested"}
+                      </span>
+                      <button
+                        type="button"
+                        className="profile-button secondary"
+                        onClick={() => void requestDesktopNotificationPermission()}
+                        disabled={notificationPermission === "unsupported"}
+                      >
+                        Request permission
+                      </button>
                     </div>
                   </div>
                 </div>

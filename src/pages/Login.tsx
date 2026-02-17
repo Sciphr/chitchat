@@ -23,6 +23,8 @@ export default function Login() {
     signInWithPassword,
     signInWithTwoFactor,
     signUp,
+    requestPasswordReset,
+    confirmPasswordReset,
     serverUrl,
     setServerUrl,
     servers,
@@ -44,6 +46,11 @@ export default function Login() {
   const [fetchingInfo, setFetchingInfo] = useState(false);
   const [twoFactorChallengeToken, setTwoFactorChallengeToken] = useState("");
   const [twoFactorCode, setTwoFactorCode] = useState("");
+  const [showPasswordReset, setShowPasswordReset] = useState(false);
+  const [resetToken, setResetToken] = useState("");
+  const [resetNewPassword, setResetNewPassword] = useState("");
+  const [resetLoading, setResetLoading] = useState(false);
+  const [resetMessage, setResetMessage] = useState("");
 
   useEffect(() => {
     if (token && user && !loading) {
@@ -142,6 +149,72 @@ export default function Login() {
       setTwoFactorCode("");
     }
     setSubmitting(false);
+  }
+
+  async function handleRequestPasswordReset() {
+    setResetMessage("");
+    setError("");
+    const trimmedUrl = localServerUrl.trim().replace(/\/+$/, "");
+    if (!trimmedUrl) {
+      setError("Server address is required");
+      return;
+    }
+    if (trimmedUrl !== serverUrl) {
+      setServerUrl(trimmedUrl);
+    }
+    const normalizedEmail = email.trim();
+    if (!normalizedEmail) {
+      setError("Enter your account email first.");
+      return;
+    }
+
+    setResetLoading(true);
+    const result = await requestPasswordReset(normalizedEmail);
+    setResetLoading(false);
+    if (result.error) {
+      setError(result.error);
+      return;
+    }
+
+    setResetMessage(
+      result.message ||
+        "If an account exists for that email, a reset token has been sent."
+    );
+  }
+
+  async function handleConfirmPasswordReset() {
+    setResetMessage("");
+    setError("");
+    const trimmedUrl = localServerUrl.trim().replace(/\/+$/, "");
+    if (!trimmedUrl) {
+      setError("Server address is required");
+      return;
+    }
+    if (trimmedUrl !== serverUrl) {
+      setServerUrl(trimmedUrl);
+    }
+    if (!resetToken.trim() || !resetNewPassword) {
+      setError("Reset token and new password are required.");
+      return;
+    }
+
+    setResetLoading(true);
+    const result = await confirmPasswordReset(
+      resetToken.trim(),
+      resetNewPassword
+    );
+    setResetLoading(false);
+
+    if (result.error) {
+      setError(result.error);
+      return;
+    }
+
+    setResetMessage("Password reset complete. You can now sign in.");
+    setPassword("");
+    setResetToken("");
+    setResetNewPassword("");
+    setShowPasswordReset(false);
   }
 
   if (loading) {
@@ -299,6 +372,21 @@ export default function Login() {
               <span>{error}</span>
             </div>
           )}
+          {resetMessage && (
+            <div
+              className="rounded-lg"
+              style={{
+                marginBottom: 20,
+                padding: "12px 14px",
+                fontSize: 13,
+                background: "rgba(16,185,129,0.08)",
+                border: "1px solid rgba(16,185,129,0.15)",
+                color: "var(--success)",
+              }}
+            >
+              {resetMessage}
+            </div>
+          )}
 
           <form onSubmit={handleSubmit}>
             <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
@@ -386,6 +474,79 @@ export default function Login() {
                   className="login-input"
                 />
               </div>
+              {mode === "login" && !twoFactorChallengeToken && (
+                <div>
+                  <button
+                    type="button"
+                    className="text-xs text-(--accent) hover:text-white transition-colors"
+                    onClick={() => {
+                      setShowPasswordReset((prev) => !prev);
+                      setResetMessage("");
+                      setError("");
+                    }}
+                  >
+                    {showPasswordReset ? "Hide password reset" : "Forgot password?"}
+                  </button>
+                  {showPasswordReset && (
+                    <div
+                      className="mt-3 rounded-lg"
+                      style={{
+                        padding: 12,
+                        border: "1px solid var(--border)",
+                        background: "rgba(255,255,255,0.02)",
+                      }}
+                    >
+                      <p className="text-[11px] text-(--text-muted)">
+                        Send reset email, then paste the token from email here.
+                      </p>
+                      <div style={{ marginTop: 10 }}>
+                        <button
+                          type="button"
+                          className="profile-button secondary"
+                          onClick={() => void handleRequestPasswordReset()}
+                          disabled={resetLoading}
+                        >
+                          {resetLoading ? "Sending..." : "Send reset email"}
+                        </button>
+                      </div>
+                      <div style={{ marginTop: 10 }}>
+                        <label className="block mb-1.5 text-[12px] font-medium text-(--text-secondary)">
+                          Reset token
+                        </label>
+                        <input
+                          type="text"
+                          value={resetToken}
+                          onChange={(e) => setResetToken(e.target.value)}
+                          placeholder="Paste token from email"
+                          className="login-input"
+                        />
+                      </div>
+                      <div style={{ marginTop: 10 }}>
+                        <label className="block mb-1.5 text-[12px] font-medium text-(--text-secondary)">
+                          New password
+                        </label>
+                        <input
+                          type="password"
+                          value={resetNewPassword}
+                          onChange={(e) => setResetNewPassword(e.target.value)}
+                          placeholder="Enter a new password"
+                          className="login-input"
+                        />
+                      </div>
+                      <div style={{ marginTop: 10 }}>
+                        <button
+                          type="button"
+                          className="profile-button"
+                          onClick={() => void handleConfirmPasswordReset()}
+                          disabled={resetLoading}
+                        >
+                          {resetLoading ? "Saving..." : "Reset password"}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
               {mode === "login" && twoFactorChallengeToken && (
                 <div>
                   <label className="block mb-1.5 text-[12px] font-medium text-(--text-secondary)">
