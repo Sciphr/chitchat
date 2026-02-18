@@ -1,42 +1,27 @@
-## ChitChat
+# ChitChat
 
-Desktop client (Tauri + React) for ChitChat.
+Windows desktop client for ChitChat.
 
-Server and deployment assets were moved to the backend repository.
+## Install on Windows
 
-## Local Development
+1. Go to Releases: https://github.com/Sciphr/chitchat/releases
+2. Download the latest **`.msi` installer** (recommended).
+3. Run the installer and launch ChitChat from the Start Menu.
 
-Install dependencies:
+### About `.msi` vs `.exe`
 
-```bash
-npm ci
-```
+- **Use `.msi`** for the best install/update experience on Windows.
+- `.exe` builds may still be in progress.
 
-Run dev server:
+## Updates
 
-```bash
-npm run dev
-```
+- In-app update checks are available from the top title bar.
+- You can also always download the newest installer from Releases.
 
-Run Tauri app:
+## Report a Bug
 
-```bash
-npm run tauri dev
-```
+- Issues: https://github.com/Sciphr/chitchat/issues
 
-Build web assets:
+## Support the Project
 
-```bash
-npm run build
-```
-
-## Dependency Security
-
-Run audits locally:
-
-```bash
-npm run audit:deps
-```
-
-CI workflow:
-- `.github/workflows/dependency-audit.yml`
+- GitHub Sponsors: https://github.com/sponsors/Sciphr

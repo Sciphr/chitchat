@@ -141,6 +141,7 @@ export default function Sidebar({
   const [addServerUrl, setAddServerUrl] = useState("");
   const [addServerError, setAddServerError] = useState("");
   const [collapsedCategories, setCollapsedCategories] = useState<Record<string, boolean>>({});
+  const [expandingCategories, setExpandingCategories] = useState<Record<string, boolean>>({});
   const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([]);
   const [audioOutputs, setAudioOutputs] = useState<MediaDeviceInfo[]>([]);
   const [devicePickerError, setDevicePickerError] = useState<string | null>(null);
@@ -156,12 +157,33 @@ export default function Sidebar({
     left: 0,
   });
   const [draggedRoomId, setDraggedRoomId] = useState<string | null>(null);
+  const [draggedCategoryId, setDraggedCategoryId] = useState<string | null>(null);
+  type DropIndicator =
+    | { type: "room"; id: string; position: "before" | "after"; categoryId: string }
+    | { type: "room-end"; categoryId: string }
+    | { type: "category"; id: string; position: "before" | "after" }
+    | null;
+  const [dropIndicator, setDropIndicator] = useState<DropIndicator>(null);
   const [showStatusMenu, setShowStatusMenu] = useState(false);
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const statusMenuRef = useRef<HTMLDivElement | null>(null);
+  const roomsListRef = useRef<HTMLDivElement | null>(null);
+  const [activeRoomPill, setActiveRoomPill] = useState({
+    top: 0,
+    height: 0,
+    visible: false,
+  });
+  const draggedRoomIdRef = useRef<string | null>(null);
+  const draggedCategoryIdRef = useRef<string | null>(null);
+  const draggedRoomCandidateIdRef = useRef<string | null>(null);
+  const draggedCategoryCandidateIdRef = useRef<string | null>(null);
+  const lastCategoryDragAtRef = useRef(0);
   const CONTEXT_MENU_MARGIN = 8;
+  const ROOM_DRAG_MIME = "application/x-chitchat-room";
+  const CATEGORY_DRAG_MIME = "application/x-chitchat-category";
 
   const channelRooms = rooms.filter((r) => r.type === "text" || r.type === "voice");
+  const canReorderLayout = canManageChannels;
 
   // Track departing voice participants so we can animate them out
   type VPart = { id: string; name: string; isSpeaking: boolean };
@@ -259,6 +281,30 @@ export default function Sidebar({
       window.removeEventListener("keydown", onEscape);
     };
   }, [showStatusMenu]);
+
+  useEffect(() => {
+    function clearDragCandidates() {
+      draggedRoomCandidateIdRef.current = null;
+      draggedCategoryCandidateIdRef.current = null;
+    }
+    window.addEventListener("mouseup", clearDragCandidates);
+    window.addEventListener("dragend", clearDragCandidates);
+    return () => {
+      window.removeEventListener("mouseup", clearDragCandidates);
+      window.removeEventListener("dragend", clearDragCandidates);
+    };
+  }, []);
+
+  // Prevent "no-drop" cursor flash when the cursor briefly passes over an element
+  // that doesn't have its own dragover handler (e.g. gaps between room wrappers).
+  useEffect(() => {
+    function handleGlobalDragOver(e: DragEvent) {
+      if (!draggedRoomIdRef.current && !draggedCategoryIdRef.current) return;
+      e.preventDefault();
+    }
+    document.addEventListener("dragover", handleGlobalDragOver);
+    return () => document.removeEventListener("dragover", handleGlobalDragOver);
+  }, []);
 
   useLayoutEffect(() => {
     if (!contextMenu || !contextMenuRef.current) return;
@@ -388,6 +434,13 @@ export default function Sidebar({
       },
     ] as RoomCategory[];
   })();
+  const categoryOrderKey = orderedCategories
+    .map((category) => `${category.id}:${category.position}`)
+    .join("|");
+  const roomOrderKey = channelRooms
+    .map((room) => `${room.id}:${room.category_id || "default"}:${room.position ?? 0}`)
+    .join("|");
+  const dmOrderKey = dmRooms.map((room) => room.id).join("|");
 
   useEffect(() => {
     if (!showCreate || createEntity !== "channel") return;
@@ -472,6 +525,95 @@ export default function Sidebar({
         }))
       ),
     });
+  }
+
+  function updateCategoryOrderAfterMove(
+    movingCategoryId: string,
+    targetCategoryId?: string,
+    insertAfter?: boolean
+  ) {
+    const nextCategories = orderedCategories.map((cat) => ({ ...cat }));
+    const movingIndex = nextCategories.findIndex((cat) => cat.id === movingCategoryId);
+    if (movingIndex === -1) return;
+
+    const [movingCategory] = nextCategories.splice(movingIndex, 1);
+    if (!movingCategory) return;
+
+    if (!targetCategoryId) {
+      nextCategories.push(movingCategory);
+    } else {
+      const targetIndex = nextCategories.findIndex((cat) => cat.id === targetCategoryId);
+      if (targetIndex === -1) {
+        nextCategories.push(movingCategory);
+      } else {
+        nextCategories.splice(insertAfter ? targetIndex + 1 : targetIndex, 0, movingCategory);
+      }
+    }
+
+    onUpdateLayout({
+      categories: nextCategories.map((cat, index) => ({
+        id: cat.id,
+        position: index,
+        enforceTypeOrder: cat.enforce_type_order === 1,
+      })),
+      rooms: nextCategories.flatMap((cat) =>
+        sortRoomsForCategory(cat, getCategoryRooms(cat.id)).map((room, index) => ({
+          id: room.id,
+          categoryId: cat.id,
+          position: index,
+        }))
+      ),
+    });
+  }
+
+  function getDraggedRoomId(dataTransfer: DataTransfer) {
+    const typed = dataTransfer.getData(ROOM_DRAG_MIME);
+    if (typed) return typed;
+    const plain = dataTransfer.getData("text/plain");
+    if (plain.startsWith("room:")) return plain.slice(5);
+    return null;
+  }
+
+  function getDraggedCategoryId(dataTransfer: DataTransfer) {
+    const typed = dataTransfer.getData(CATEGORY_DRAG_MIME);
+    if (typed) return typed;
+    const plain = dataTransfer.getData("text/plain");
+    if (plain.startsWith("category:")) return plain.slice(9);
+    return null;
+  }
+
+  function getCurrentDraggedRoomId(dataTransfer?: DataTransfer | null) {
+    if (dataTransfer) {
+      const fromData = getDraggedRoomId(dataTransfer);
+      if (fromData) return fromData;
+    }
+    return (
+      draggedRoomIdRef.current ||
+      draggedRoomCandidateIdRef.current ||
+      draggedRoomId
+    );
+  }
+
+  function getCurrentDraggedCategoryId(dataTransfer?: DataTransfer | null) {
+    if (dataTransfer) {
+      const fromData = getDraggedCategoryId(dataTransfer);
+      if (fromData) return fromData;
+    }
+    return (
+      draggedCategoryIdRef.current ||
+      draggedCategoryCandidateIdRef.current ||
+      draggedCategoryId
+    );
+  }
+
+  function resetDragState() {
+    draggedRoomIdRef.current = null;
+    draggedCategoryIdRef.current = null;
+    draggedRoomCandidateIdRef.current = null;
+    draggedCategoryCandidateIdRef.current = null;
+    setDraggedRoomId(null);
+    setDraggedCategoryId(null);
+    setDropIndicator(null);
   }
 
   // Fetch fresh media limits from server and position the popover
@@ -699,6 +841,108 @@ export default function Sidebar({
     }
   }
 
+  const syncActiveRoomPill = useCallback(() => {
+    const listEl = roomsListRef.current;
+    const currentActiveRoom = activeRoom;
+    const activeRoomId = currentActiveRoom?.id;
+    if (!listEl || !currentActiveRoom || !activeRoomId) {
+      setActiveRoomPill((prev) =>
+        prev.visible ? { ...prev, visible: false } : prev
+      );
+      return;
+    }
+
+    if (currentActiveRoom.type !== "dm") {
+      const resolvedActiveRoom = channelRooms.find((room) => room.id === activeRoomId);
+      const categoryId =
+        resolvedActiveRoom?.category_id ||
+        currentActiveRoom.category_id ||
+        "default";
+      if (collapsedCategories[categoryId] || expandingCategories[categoryId]) {
+        setActiveRoomPill((prev) =>
+          prev.visible ? { ...prev, visible: false } : prev
+        );
+        return;
+      }
+    }
+
+    const roomEls = listEl.querySelectorAll<HTMLElement>("[data-room-id]");
+    let targetEl: HTMLElement | null = null;
+    for (const el of roomEls) {
+      if (el.dataset.roomId === activeRoomId) {
+        targetEl = el;
+        break;
+      }
+    }
+
+    if (!targetEl) {
+      setActiveRoomPill((prev) =>
+        prev.visible ? { ...prev, visible: false } : prev
+      );
+      return;
+    }
+
+    const renderedHeight = targetEl.getBoundingClientRect().height;
+    if (renderedHeight < 8) {
+      setActiveRoomPill((prev) =>
+        prev.visible ? { ...prev, visible: false } : prev
+      );
+      return;
+    }
+
+    const nextTop = Math.round(targetEl.offsetTop - listEl.scrollTop);
+    const nextHeight = Math.round(targetEl.offsetHeight);
+    setActiveRoomPill((prev) => {
+      if (
+        prev.visible &&
+        prev.top === nextTop &&
+        prev.height === nextHeight
+      ) {
+        return prev;
+      }
+      return {
+        top: nextTop,
+        height: nextHeight,
+        visible: true,
+      };
+    });
+  }, [
+    activeRoom,
+    channelRooms,
+    collapsedCategories,
+    expandingCategories,
+    draggedRoomId,
+    draggedCategoryId,
+  ]);
+
+  useLayoutEffect(() => {
+    const frame = requestAnimationFrame(syncActiveRoomPill);
+    return () => cancelAnimationFrame(frame);
+  }, [
+    syncActiveRoomPill,
+    collapsedCategories,
+    activeRoom?.id,
+    rooms.length,
+    dmRooms.length,
+    draggedRoomId,
+    categoryOrderKey,
+    roomOrderKey,
+    dmOrderKey,
+  ]);
+
+  useEffect(() => {
+    const listEl = roomsListRef.current;
+    if (!listEl) return;
+    const onScroll = () => syncActiveRoomPill();
+    const onResize = () => syncActiveRoomPill();
+    listEl.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("resize", onResize);
+    return () => {
+      listEl.removeEventListener("scroll", onScroll);
+      window.removeEventListener("resize", onResize);
+    };
+  }, [syncActiveRoomPill]);
+
   return (
     <>
       <aside
@@ -772,22 +1016,22 @@ export default function Sidebar({
               </div>
             </div>
             {canCreateRooms && (
-              <button
-                onClick={() =>
-                  openCreateModal({
-                    entity: "channel",
-                    type: "text",
-                    categoryId:
-                      activeRoom?.type === "text" || activeRoom?.type === "voice"
-                        ? activeRoom.category_id || "default"
-                        : orderedCategories[0]?.id || "default",
-                  })
-                }
-                className="sidebar-create-btn"
-                title="Create"
-              >
-                +
-              </button>
+                <button
+                  onClick={() =>
+                    openCreateModal({
+                      entity: "channel",
+                      type: "text",
+                      categoryId:
+                        activeRoom?.type === "text" || activeRoom?.type === "voice"
+                          ? activeRoom.category_id || "default"
+                          : orderedCategories[0]?.id || "default",
+                    })
+                  }
+                  className="sidebar-create-btn"
+                  title="Create"
+                >
+                  +
+                </button>
             )}
           </div>
         </div>
@@ -1118,6 +1362,7 @@ export default function Sidebar({
       {/* Room lists */}
       <div
         className="sidebar-rooms"
+        ref={roomsListRef}
         onContextMenu={(event) => {
           if (!canCreateRooms && !canManageChannels) return;
           event.preventDefault();
@@ -1128,17 +1373,112 @@ export default function Sidebar({
             categoryId: orderedCategories[0]?.id || "default",
           });
         }}
+        onDragOver={(event) => {
+          if (!canManageChannels || !canReorderLayout) return;
+          const movingCategoryId = getCurrentDraggedCategoryId(event.dataTransfer);
+          const movingRoomId = getCurrentDraggedRoomId(event.dataTransfer);
+          if (!movingCategoryId && !movingRoomId) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "move";
+        }}
+        onDrop={(event) => {
+          if (!canManageChannels || !canReorderLayout) return;
+          const movingCategoryId = getCurrentDraggedCategoryId(event.dataTransfer);
+          const movingRoomId = getCurrentDraggedRoomId(event.dataTransfer);
+          if (!movingCategoryId && !movingRoomId) return;
+          event.preventDefault();
+          if (movingCategoryId) {
+            updateCategoryOrderAfterMove(movingCategoryId);
+          }
+          resetDragState();
+        }}
       >
+        <motion.div
+          className="sidebar-channel-active-pill"
+          initial={false}
+          animate={{
+            y: activeRoomPill.top,
+            height: activeRoomPill.height,
+            opacity: activeRoomPill.visible ? 1 : 0,
+          }}
+          transition={{
+            type: "spring",
+            stiffness: 540,
+            damping: 44,
+            mass: 0.7,
+          }}
+        />
         {orderedCategories.map((category) => {
           const categoryRooms = sortRoomsForCategory(
             category,
             getCategoryRooms(category.id)
           );
           const isCollapsed = collapsedCategories[category.id] ?? false;
+          const catDropClass =
+            dropIndicator?.type === "category" && dropIndicator.id === category.id
+              ? dropIndicator.position === "before" ? "category-drop-before" : "category-drop-after"
+              : undefined;
           return (
-            <div key={category.id}>
+            <div key={category.id} className={catDropClass}>
               <button
-                className="sidebar-section-title heading-font sidebar-section-toggle"
+                className={`sidebar-section-title heading-font sidebar-section-toggle ${
+                  draggedCategoryId === category.id ? "dragging" : ""
+                }`}
+                draggable={canManageChannels && canReorderLayout}
+                onMouseDown={() => {
+                  if (!canManageChannels || !canReorderLayout) return;
+                  draggedRoomCandidateIdRef.current = null;
+                  draggedCategoryCandidateIdRef.current = category.id;
+                }}
+                onDragStart={(event) => {
+                  if (!canManageChannels || !canReorderLayout) return;
+                  event.dataTransfer.effectAllowed = "move";
+                  event.dataTransfer.setData(CATEGORY_DRAG_MIME, category.id);
+                  event.dataTransfer.setData("text/plain", `category:${category.id}`);
+                  draggedRoomIdRef.current = null;
+                  draggedRoomCandidateIdRef.current = null;
+                  setDraggedRoomId(null);
+                  draggedCategoryIdRef.current = category.id;
+                  setDraggedCategoryId(category.id);
+                }}
+                onDragEnd={() => {
+                  resetDragState();
+                  lastCategoryDragAtRef.current = Date.now();
+                }}
+                onDragOver={(event) => {
+                  if (!canManageChannels || !canReorderLayout) return;
+                  const movingCategoryId = getCurrentDraggedCategoryId(event.dataTransfer);
+                  const movingRoomId = getCurrentDraggedRoomId(event.dataTransfer);
+                  if (!movingCategoryId && !movingRoomId) return;
+                  if (movingCategoryId && movingCategoryId === category.id) return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  event.dataTransfer.dropEffect = "move";
+                  if (movingCategoryId) {
+                    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+                    const pos = event.clientY < rect.top + rect.height / 2 ? "before" : "after";
+                    setDropIndicator({ type: "category", id: category.id, position: pos });
+                  }
+                }}
+                onDrop={(event) => {
+                  if (!canManageChannels || !canReorderLayout) return;
+                  const movingCategoryId = getCurrentDraggedCategoryId(event.dataTransfer);
+                  const movingRoomId = getCurrentDraggedRoomId(event.dataTransfer);
+                  if (!movingCategoryId && !movingRoomId) return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  if (movingCategoryId && movingCategoryId !== category.id) {
+                    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+                    const insertAfter = event.clientY >= rect.top + rect.height / 2;
+                    updateCategoryOrderAfterMove(movingCategoryId, category.id, insertAfter);
+                    resetDragState();
+                    return;
+                  }
+                  if (movingRoomId) {
+                    updateLayoutAfterMove(movingRoomId, category.id, categoryRooms.length);
+                    resetDragState();
+                  }
+                }}
                 onContextMenu={(event) => {
                   if (!canCreateRooms && !canManageChannels) return;
                   event.preventDefault();
@@ -1153,12 +1493,36 @@ export default function Sidebar({
                     renameName: category.name,
                   });
                 }}
-                onClick={() =>
+                onClick={() => {
+                  if (canReorderLayout && Date.now() - lastCategoryDragAtRef.current < 180) return;
+                  const activeCategoryId =
+                    (activeRoom && activeRoom.type !== "dm"
+                      ? channelRooms.find((room) => room.id === activeRoom.id)?.category_id
+                      : null) ||
+                    (activeRoom && activeRoom.type !== "dm" ? activeRoom.category_id : null) ||
+                    "default";
+                  const togglesSelectedRoomCategory =
+                    activeRoom?.type !== "dm" && activeCategoryId === category.id;
+                  if (togglesSelectedRoomCategory) {
+                    setActiveRoomPill((prev) =>
+                      prev.visible ? { ...prev, visible: false } : prev
+                    );
+                  }
+                  if (isCollapsed && togglesSelectedRoomCategory) {
+                    setExpandingCategories((prev) => ({ ...prev, [category.id]: true }));
+                  } else {
+                    setExpandingCategories((prev) => {
+                      if (!prev[category.id]) return prev;
+                      const next = { ...prev };
+                      delete next[category.id];
+                      return next;
+                    });
+                  }
                   setCollapsedCategories((prev) => ({
                     ...prev,
                     [category.id]: !isCollapsed,
-                  }))
-                }
+                  }));
+                }}
               >
                 <span className="sidebar-section-toggle-label">
                   {category.name} - {categoryRooms.length}
@@ -1175,6 +1539,15 @@ export default function Sidebar({
                     animate={{ height: "auto", opacity: 1 }}
                     exit={{ height: 0, opacity: 0 }}
                     transition={{ duration: 0.2, ease: "easeOut" }}
+                    onAnimationComplete={() => {
+                      setExpandingCategories((prev) => {
+                        if (!prev[category.id]) return prev;
+                        const next = { ...prev };
+                        delete next[category.id];
+                        return next;
+                      });
+                      syncActiveRoomPill();
+                    }}
                     style={{ overflow: "hidden" }}
                     onContextMenu={(event) => {
                       if (!canCreateRooms && !canManageChannels) return;
@@ -1188,26 +1561,90 @@ export default function Sidebar({
                       });
                     }}
                     onDragOver={(event) => {
-                      if (!canManageChannels) return;
+                      if (!canManageChannels || !canReorderLayout) return;
+                      const movingRoomId = getCurrentDraggedRoomId(event.dataTransfer);
+                      if (!movingRoomId) return;
                       event.preventDefault();
+                      event.stopPropagation();
+                      event.dataTransfer.dropEffect = "move";
+                      setDropIndicator({ type: "room-end", categoryId: category.id });
                     }}
                     onDrop={(event) => {
-                      if (!canManageChannels) return;
+                      if (!canManageChannels || !canReorderLayout) return;
+                      const movingRoomId = getCurrentDraggedRoomId(event.dataTransfer);
+                      if (!movingRoomId) return;
                       event.preventDefault();
-                      if (!draggedRoomId) return;
-                      updateLayoutAfterMove(draggedRoomId, category.id, categoryRooms.length);
-                      setDraggedRoomId(null);
+                      event.stopPropagation();
+                      updateLayoutAfterMove(movingRoomId, category.id, categoryRooms.length);
+                      resetDragState();
                     }}
                   >
-                    {categoryRooms.map((room) => (
+                    {categoryRooms.map((room) => {
+                      const isLastRoom = room.id === categoryRooms[categoryRooms.length - 1]?.id;
+                      const roomDropClass =
+                        dropIndicator?.type === "room" && dropIndicator.id === room.id
+                          ? dropIndicator.position === "before" ? "room-drop-before" : "room-drop-after"
+                          : dropIndicator?.type === "room-end" && dropIndicator.categoryId === category.id && isLastRoom
+                            ? "room-drop-after"
+                            : undefined;
+                      return (
                       <motion.div
                         key={room.id}
+                        className={roomDropClass}
                         initial={{ opacity: 0, y: -4 }}
                         animate={{ opacity: 1, y: 0 }}
                         exit={{ opacity: 0, y: -4 }}
                         transition={{ duration: 0.16, ease: "easeOut" }}
+                        onDragOver={(event) => {
+                          if (!canManageChannels || !canReorderLayout) return;
+                          const movingRoomId = getCurrentDraggedRoomId(event.dataTransfer);
+                          if (!movingRoomId) return;
+                          event.preventDefault();
+                          event.stopPropagation();
+                          event.dataTransfer.dropEffect = "move";
+                          if (movingRoomId !== room.id) {
+                            const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+                            const pos = event.clientY < rect.top + rect.height / 2 ? "before" : "after";
+                            setDropIndicator({ type: "room", id: room.id, position: pos, categoryId: category.id });
+                          } else {
+                            setDropIndicator(null);
+                          }
+                        }}
+                        onDrop={(event) => {
+                          if (!canManageChannels || !canReorderLayout) return;
+                          const movingRoomId = getCurrentDraggedRoomId(event.dataTransfer);
+                          if (!movingRoomId) return;
+                          event.preventDefault();
+                          event.stopPropagation();
+                          if (movingRoomId === room.id) { resetDragState(); return; }
+                          const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+                          const insertAfter = event.clientY >= rect.top + rect.height / 2;
+                          const baseIndex = categoryRooms.findIndex((r) => r.id === room.id);
+                          updateLayoutAfterMove(movingRoomId, category.id, insertAfter ? baseIndex + 1 : baseIndex);
+                          resetDragState();
+                        }}
                       >
                         <button
+                          draggable={canManageChannels && canReorderLayout}
+                          onMouseDown={() => {
+                            if (!canManageChannels || !canReorderLayout) return;
+                            draggedCategoryCandidateIdRef.current = null;
+                            draggedRoomCandidateIdRef.current = room.id;
+                          }}
+                          onDragStart={(event) => {
+                            if (!canManageChannels || !canReorderLayout) return;
+                            event.dataTransfer.effectAllowed = "move";
+                            event.dataTransfer.setData(ROOM_DRAG_MIME, room.id);
+                            event.dataTransfer.setData("text/plain", `room:${room.id}`);
+                            draggedCategoryIdRef.current = null;
+                            draggedCategoryCandidateIdRef.current = null;
+                            setDraggedCategoryId(null);
+                            draggedRoomIdRef.current = room.id;
+                            setDraggedRoomId(room.id);
+                          }}
+                          onDragEnd={() => {
+                            resetDragState();
+                          }}
                           onClick={() => onSelectRoom(room)}
                           onContextMenu={(event) => {
                             if (!canCreateRooms && !canManageChannels) return;
@@ -1223,24 +1660,11 @@ export default function Sidebar({
                               renameName: room.name,
                             });
                           }}
-                          draggable={canManageChannels}
-                          onDragStart={() => setDraggedRoomId(room.id)}
-                          onDragEnd={() => setDraggedRoomId(null)}
-                          onDragOver={(event) => {
-                            if (!canManageChannels) return;
-                            event.preventDefault();
-                          }}
-                          onDrop={(event) => {
-                            if (!canManageChannels) return;
-                            event.preventDefault();
-                            if (!draggedRoomId || draggedRoomId === room.id) return;
-                            const targetIndex = categoryRooms.findIndex((r) => r.id === room.id);
-                            updateLayoutAfterMove(draggedRoomId, category.id, targetIndex);
-                            setDraggedRoomId(null);
-                          }}
                           className={`sidebar-channel ${
                             activeRoom?.id === room.id ? "active" : ""
                           } ${draggedRoomId === room.id ? "dragging" : ""}`}
+                          title={room.name}
+                          data-room-id={room.id}
                         >
                           <span className="sidebar-channel-main">
                             <span className="sidebar-channel-icon" aria-hidden="true">
@@ -1250,7 +1674,9 @@ export default function Sidebar({
                                 <MessageSquare size={14} />
                               )}
                             </span>
-                            <span className="sidebar-channel-main-text">{room.name}</span>
+                            <span className="sidebar-channel-main-text">
+                              {room.name}
+                            </span>
                             {room.type === "voice" && (
                               <span className="sidebar-voice-count">
                                 {voiceParticipants[room.id]?.length ?? 0}
@@ -1293,7 +1719,8 @@ export default function Sidebar({
                           </div>
                         ) : null}
                       </motion.div>
-                    ))}
+                      );
+                    })}
                   </motion.div>
                 )}
               </AnimatePresence>
@@ -1316,13 +1743,23 @@ export default function Sidebar({
                     animate={{ opacity: 1, x: 0, height: "auto" }}
                     exit={{ opacity: 0, x: -20, height: 0 }}
                     transition={{ duration: 0.25, ease: "easeOut" }}
-                    className={`sidebar-channel sidebar-dm-row ${activeRoom?.id === dm.id ? "active" : ""}`}
+                    className={`sidebar-channel sidebar-dm-row ${
+                      activeRoom?.id === dm.id ? "active" : ""
+                    }`}
+                    role="button"
+                    tabIndex={0}
+                    data-room-id={dm.id}
+                    onClick={() => onSelectRoom(dm)}
+                    onKeyDown={(event) => {
+                      if (event.target !== event.currentTarget) return;
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        onSelectRoom(dm);
+                      }
+                    }}
+                    title={displayName}
                   >
-                    <button
-                      type="button"
-                      onClick={() => onSelectRoom(dm)}
-                      className="sidebar-dm-open"
-                    >
+                    <div className="sidebar-dm-open">
                       <span className="sidebar-channel-main">
                         <span className="sidebar-dm-avatar">
                           {dm.other_avatar_url ? (
@@ -1331,10 +1768,12 @@ export default function Sidebar({
                             displayName.charAt(0).toUpperCase()
                           )}
                         </span>
-                        <span className="sidebar-channel-main-text">{displayName}</span>
+                        <span className="sidebar-channel-main-text">
+                          {displayName}
+                        </span>
                       </span>
                       {renderRoomBadges(dm.id)}
-                    </button>
+                    </div>
                     <button
                       type="button"
                       className="sidebar-dm-hide"
@@ -1531,7 +1970,6 @@ export default function Sidebar({
       <div className="sidebar-user-panel">
         <div
           className="sidebar-user"
-          style={{ display: "flex", alignItems: "center", gap: "12px", cursor: "pointer" }}
           role="button"
           tabIndex={0}
           onClick={onOpenSettings}
@@ -1559,58 +1997,55 @@ export default function Sidebar({
           </div>
           <div className="sidebar-user-info">
             <div className="sidebar-user-name">{username}</div>
-            <div
-              className="sidebar-user-status-wrap"
-              ref={statusMenuRef}
-              onClick={(event) => event.stopPropagation()}
-              onKeyDown={(event) => event.stopPropagation()}
+          </div>
+          <div
+            className="sidebar-user-status-wrap"
+            ref={statusMenuRef}
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => event.stopPropagation()}
+          >
+            <button
+              type="button"
+              className="sidebar-user-status sidebar-user-status-trigger"
+              onClick={() => setShowStatusMenu((prev) => !prev)}
+              aria-haspopup="menu"
+              aria-expanded={showStatusMenu}
+              title={`Status: ${currentStatus.label}`}
             >
-              <button
-                type="button"
-                className="sidebar-user-status sidebar-user-status-trigger"
-                onClick={() => setShowStatusMenu((prev) => !prev)}
-                aria-haspopup="menu"
-                aria-expanded={showStatusMenu}
-                title="Change status"
-              >
-                <span
-                  className="sidebar-user-status-dot"
-                  style={{ background: currentStatus.color }}
-                />
-                <span className="sidebar-user-status-label">
-                  {currentStatus.label}
-                </span>
-                <ChevronDown
-                  size={12}
-                  className={`sidebar-user-status-caret ${showStatusMenu ? "open" : ""}`}
-                />
-              </button>
-              {showStatusMenu && (
-                <div className="sidebar-status-menu" role="menu" aria-label="Change status">
-                  {statusOptions.map((option) => (
-                    <button
-                      key={option.value}
-                      type="button"
-                      role="menuitemradio"
-                      aria-checked={status === option.value}
-                      className={`sidebar-status-menu-item ${
-                        status === option.value ? "active" : ""
-                      }`}
-                      onClick={() => {
-                        onChangeStatus(option.value);
-                        setShowStatusMenu(false);
-                      }}
-                    >
-                      <span
-                        className="sidebar-user-status-dot"
-                        style={{ background: option.color }}
-                      />
-                      <span>{option.label}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
+              <span
+                className="sidebar-user-status-dot"
+                style={{ background: currentStatus.color }}
+              />
+              <ChevronDown
+                size={11}
+                className={`sidebar-user-status-caret ${showStatusMenu ? "open" : ""}`}
+              />
+            </button>
+            {showStatusMenu && (
+              <div className="sidebar-status-menu" role="menu" aria-label="Change status">
+                {statusOptions.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={status === option.value}
+                    className={`sidebar-status-menu-item ${
+                      status === option.value ? "active" : ""
+                    }`}
+                    onClick={() => {
+                      onChangeStatus(option.value);
+                      setShowStatusMenu(false);
+                    }}
+                  >
+                    <span
+                      className="sidebar-user-status-dot"
+                      style={{ background: option.color }}
+                    />
+                    <span>{option.label}</span>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>

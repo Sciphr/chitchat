@@ -382,7 +382,15 @@ export default function Home() {
     categories: Array<{ id: string; position: number; enforceTypeOrder: boolean }>;
     rooms: Array<{ id: string; categoryId: string; position: number }>;
   }) {
-    socket.emit("layout:update", payload);
+    socket.emit(
+      "layout:update",
+      payload,
+      (ack?: { ok: boolean; error?: string }) => {
+        if (!ack?.ok) {
+          console.warn("Failed to update layout:", ack?.error || "unknown error");
+        }
+      }
+    );
   }
 
   function handleRenameRoom(roomId: string, name: string) {
@@ -1131,10 +1139,10 @@ export default function Home() {
   }
 
   return (
-    <div className="relative flex flex-1 bg-[var(--bg-primary)]">
+    <div className="relative flex flex-1 min-w-0 min-h-0 overflow-hidden bg-[var(--bg-primary)]">
       <div className="absolute inset-0 app-bg" />
 
-      <div className="relative z-10 flex w-full h-full p-4 gap-5">
+      <div className="relative z-10 flex w-full h-full min-w-0 min-h-0 overflow-hidden p-4 gap-5">
         <Sidebar
           rooms={rooms}
           categories={categories}
@@ -1178,7 +1186,7 @@ export default function Home() {
         />
 
         {/* Main content area */}
-        <main className="flex-1 flex flex-col min-w-0">
+        <main className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
           {!isConnected && token && (
             <div className="reconnect-banner">
               <span>
@@ -1195,7 +1203,7 @@ export default function Home() {
               </button>
             </div>
           )}
-          <div className="flex-1 flex flex-col rounded-2xl panel overflow-hidden">
+          <div className="flex-1 flex flex-col min-w-0 min-h-0 rounded-2xl panel overflow-hidden">
             {announcementText && !announcementDismissed && (
               <div className="server-announcement-banner">
                 <span>{announcementText}</span>
@@ -1242,7 +1250,7 @@ export default function Home() {
             )}
             {voiceSessionRoom && (
               <div
-                className="flex-1 flex flex-col"
+                className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden"
                 style={{ display: activeRoom?.type === "voice" ? undefined : "none" }}
               >
                 <VoiceChannel

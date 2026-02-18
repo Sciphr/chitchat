@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Bug, Minus, RefreshCw, Square, X } from "lucide-react";
+import { Bug, Heart, Minus, RefreshCw, Square, X } from "lucide-react";
 
 const appWindow = getCurrentWindow();
 
@@ -78,6 +78,16 @@ export default function TitleBar() {
     }
   }
 
+  async function openSponsorPage() {
+    const url = "https://github.com/sponsors/Sciphr";
+    try {
+      const { openUrl } = await import("@tauri-apps/plugin-opener");
+      await openUrl(url);
+    } catch {
+      window.open(url, "_blank", "noopener,noreferrer");
+    }
+  }
+
   return (
     <>
       <div className="titlebar" data-tauri-drag-region>
@@ -100,6 +110,14 @@ export default function TitleBar() {
             title="Report an issue"
           >
             <Bug size={14} />
+          </button>
+          <button
+            className="titlebar-btn titlebar-btn-sponsor"
+            onClick={openSponsorPage}
+            aria-label="Sponsor ChitChat"
+            title="Sponsor ChitChat"
+          >
+            <Heart size={14} />
           </button>
           {isDesktop && (
             <button

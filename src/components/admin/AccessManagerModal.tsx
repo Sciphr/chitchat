@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Socket } from "socket.io-client";
 import type { Room, ServerUser } from "../../types";
 
@@ -135,6 +135,7 @@ export default function AccessManagerModal({
   const [draftRoomPermissions, setDraftRoomPermissions] = useState<
     Record<string, RoomPermission>
   >({});
+  const membersListRef = useRef<HTMLDivElement | null>(null);
 
   const sortedRoles = useMemo(() => sortRoles(roles), [roles]);
   const assignableRoles = useMemo(
@@ -225,6 +226,12 @@ export default function AccessManagerModal({
       setSelectedRoomId(manageableRooms[0].id);
     }
   }, [manageableRooms, selectedRoomId]);
+
+  useEffect(() => {
+    if (activeTab !== "members") return;
+    if (!membersListRef.current) return;
+    membersListRef.current.scrollTop = 0;
+  }, [activeTab]);
 
   useEffect(() => {
     if (selectedRoleId && sortedRoles.some((role) => role.id === selectedRoleId)) {
@@ -579,14 +586,14 @@ export default function AccessManagerModal({
 
           {!loading && activeTab === "members" && (
             <div className="access-two-pane">
-              <div className="profile-section access-pane-list">
+              <div className="profile-section access-pane-list" ref={membersListRef}>
                 <div className="profile-section-title">Members</div>
                 <div className="access-role-list">
                   {users.map((entry) => (
                     <button
                       key={entry.id}
                       type="button"
-                      className={`access-list-item access-role-list-item ${
+                      className={`access-list-item access-role-list-item access-member-list-item ${
                         selectedUser?.id === entry.id ? "active" : ""
                       }`}
                       onClick={() => setSelectedUserId(entry.id)}
@@ -709,7 +716,7 @@ export default function AccessManagerModal({
                         <div className="access-room-role" style={{ color: role.color }}>
                           {role.name}
                         </div>
-                        <label className="text-sm">
+                        <label className="text-sm access-room-toggle">
                           <input
                             type="checkbox"
                             checked={draft.allowView}
@@ -721,7 +728,7 @@ export default function AccessManagerModal({
                           />{" "}
                           View
                         </label>
-                        <label className="text-sm">
+                        <label className="text-sm access-room-toggle">
                           <input
                             type="checkbox"
                             checked={draft.allowSend}
@@ -733,7 +740,7 @@ export default function AccessManagerModal({
                           />{" "}
                           Send
                         </label>
-                        <label className="text-sm">
+                        <label className="text-sm access-room-toggle">
                           <input
                             type="checkbox"
                             checked={draft.allowConnect}
