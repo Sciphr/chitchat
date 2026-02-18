@@ -83,6 +83,21 @@ const CAPABILITY_OPTIONS: Array<{
   { key: "canStartVoice", roleField: "can_start_voice", label: "Start/join voice" },
 ];
 
+const DEFAULT_ROLE_CAPABILITIES: Record<PermissionKey, boolean> = {
+  canManageChannels: false,
+  canManageRoles: false,
+  canManageServer: false,
+  canKickMembers: false,
+  canBanMembers: false,
+  canTimeoutMembers: false,
+  canModerateVoice: false,
+  canPinMessages: false,
+  canManageMessages: false,
+  canUploadFiles: true,
+  canUseEmojis: true,
+  canStartVoice: true,
+};
+
 export default function AccessManagerModal({
   socket,
   isConnected,
@@ -107,24 +122,13 @@ export default function AccessManagerModal({
   const [activeTab, setActiveTab] = useState<"roles" | "members" | "rooms">(
     "roles"
   );
+  const [selectedRoleId, setSelectedRoleId] = useState("");
+  const [showCreateRoleModal, setShowCreateRoleModal] = useState(false);
   const [newRoleName, setNewRoleName] = useState("");
   const [newRoleColor, setNewRoleColor] = useState("#94a3b8");
   const [newRoleCapabilities, setNewRoleCapabilities] = useState<
     Record<PermissionKey, boolean>
-  >({
-    canManageChannels: false,
-    canManageRoles: false,
-    canManageServer: false,
-    canKickMembers: false,
-    canBanMembers: false,
-    canTimeoutMembers: false,
-    canModerateVoice: false,
-    canPinMessages: false,
-    canManageMessages: false,
-    canUploadFiles: true,
-    canUseEmojis: true,
-    canStartVoice: true,
-  });
+  >(DEFAULT_ROLE_CAPABILITIES);
 
   const [selectedUserId, setSelectedUserId] = useState("");
   const [selectedRoomId, setSelectedRoomId] = useState("");
@@ -148,6 +152,8 @@ export default function AccessManagerModal({
     manageableRooms.find((entry) => entry.id === selectedRoomId) ||
     manageableRooms[0] ||
     null;
+  const selectedRole =
+    sortedRoles.find((role) => role.id === selectedRoleId) || sortedRoles[0] || null;
 
   const applyRoleState = useCallback((payload: RoleStatePayload) => {
     setRoles(sortRoles(payload.roles || []));
@@ -221,6 +227,13 @@ export default function AccessManagerModal({
   }, [manageableRooms, selectedRoomId]);
 
   useEffect(() => {
+    if (selectedRoleId && sortedRoles.some((role) => role.id === selectedRoleId)) {
+      return;
+    }
+    setSelectedRoleId(sortedRoles[0]?.id || "");
+  }, [sortedRoles, selectedRoleId]);
+
+  useEffect(() => {
     if (!selectedRoom) return;
     const current = roomPermissions[selectedRoom.id] || [];
     const next: Record<string, RoomPermission> = {};
@@ -272,22 +285,17 @@ export default function AccessManagerModal({
         }
         setNewRoleName("");
         setNewRoleColor("#94a3b8");
-        setNewRoleCapabilities({
-          canManageChannels: false,
-          canManageRoles: false,
-          canManageServer: false,
-          canKickMembers: false,
-          canBanMembers: false,
-          canTimeoutMembers: false,
-          canModerateVoice: false,
-          canPinMessages: false,
-          canManageMessages: false,
-          canUploadFiles: true,
-          canUseEmojis: true,
-          canStartVoice: true,
-        });
+        setNewRoleCapabilities(DEFAULT_ROLE_CAPABILITIES);
+        setShowCreateRoleModal(false);
       }
     );
+  }
+
+  function openCreateRoleModal() {
+    setNewRoleName("");
+    setNewRoleColor("#94a3b8");
+    setNewRoleCapabilities(DEFAULT_ROLE_CAPABILITIES);
+    setShowCreateRoleModal(true);
   }
 
   function updateRole(
@@ -360,6 +368,10 @@ export default function AccessManagerModal({
         setSaving(false);
         if (!ack?.ok) {
           setError(ack?.error || "Failed to delete role.");
+          return;
+        }
+        if (selectedRoleId === roleId) {
+          setSelectedRoleId("");
         }
       }
     );
@@ -449,116 +461,118 @@ export default function AccessManagerModal({
           )}
 
           {!loading && activeTab === "roles" && (
-            <div className="access-manager-stack">
-              <div className="profile-section">
-                <div className="profile-section-title">Create Role</div>
-                <div className="profile-grid">
-                  <div>
-                    <label className="profile-label">Name</label>
-                    <input
-                      className="profile-input"
-                      value={newRoleName}
-                      onChange={(e) => setNewRoleName(e.target.value)}
-                      placeholder="Moderator"
-                    />
-                  </div>
-                  <div>
-                    <label className="profile-label">Color</label>
-                    <div className="access-role-color-row">
-                      <input
-                        type="color"
-                        value={newRoleColor}
-                        onChange={(e) => setNewRoleColor(e.target.value)}
-                      />
-                      <span style={{ fontWeight: 700, color: newRoleColor }}>
-                        Example Username
-                      </span>
-                    </div>
-                  </div>
+            <div className="access-two-pane access-roles-pane">
+              <div className="profile-section access-pane-list">
+                <div className="access-role-list-header">
+                  <div className="profile-section-title">Roles</div>
+                  <button
+                    type="button"
+                    className="profile-button"
+                    onClick={openCreateRoleModal}
+                    disabled={saving}
+                  >
+                    New role
+                  </button>
                 </div>
-                <div className="access-role-flags">
-                  {CAPABILITY_OPTIONS.map((capability) => (
-                    <label key={capability.key} className="text-sm">
-                      <input
-                        type="checkbox"
-                        checked={Boolean(newRoleCapabilities[capability.key])}
-                        onChange={(e) =>
-                          setNewRoleCapabilities((prev) => ({
-                            ...prev,
-                            [capability.key]: e.target.checked,
-                          }))
-                        }
-                      />{" "}
-                      {capability.label}
-                    </label>
+                <div className="access-role-list">
+                  {sortedRoles.map((role) => (
+                    <button
+                      key={role.id}
+                      type="button"
+                      className={`access-list-item access-role-list-item ${
+                        selectedRole?.id === role.id ? "active" : ""
+                      }`}
+                      onClick={() => setSelectedRoleId(role.id)}
+                    >
+                      <span className="access-role-list-main">
+                        <span
+                          className="access-role-color-dot"
+                          style={{ background: role.color }}
+                        />
+                        <span>{role.name}</span>
+                      </span>
+                      <span className="text-xs text-[var(--text-muted)]">
+                        #{role.position}
+                      </span>
+                    </button>
                   ))}
                 </div>
-                <button
-                  type="button"
-                  className="profile-button"
-                  onClick={createRole}
-                  disabled={saving}
-                >
-                  Create role
-                </button>
               </div>
 
               <div className="profile-section">
-                <div className="profile-section-title">Existing Roles</div>
-                <div className="access-role-list">
-                  {sortedRoles.map((role) => (
-                    <div key={role.id} className="access-role-row">
-                      <div>
-                        <div style={{ fontWeight: 700, color: role.color }}>
-                          {role.name}
-                        </div>
-                        <div className="text-xs text-[var(--text-muted)]">
-                          Position {role.position}
-                          {role.is_system === 1 ? " - system" : ""}
-                        </div>
-                      </div>
-                      <div className="access-role-row-controls">
-                        {CAPABILITY_OPTIONS.map((capability) => (
-                          <label key={`${role.id}-${capability.key}`} className="text-sm">
-                            <input
-                              type="checkbox"
-                              checked={Boolean(role[capability.roleField] === 1)}
-                              onChange={(e) => {
-                                const nextPatch = {
-                                  [capability.key]: e.target.checked,
-                                } as any;
-                                updateRole(role.id, nextPatch);
-                              }}
-                              disabled={saving}
-                            />{" "}
-                            {capability.label}
-                          </label>
-                        ))}
-                        <label className="text-sm">
-                          Color{" "}
-                          <input
-                            type="color"
-                            value={role.color}
-                            onChange={(e) =>
-                              updateRole(role.id, { color: e.target.value })
-                            }
-                            disabled={saving}
+                <div className="profile-section-title">
+                  {selectedRole ? `Edit role: ${selectedRole.name}` : "Select a role"}
+                </div>
+                {selectedRole ? (
+                  <div className="access-role-editor">
+                    <div className="access-role-color-row">
+                      <label className="profile-label" htmlFor="access-role-color">
+                        Color
+                      </label>
+                      <div className="access-role-color-input">
+                        <input
+                          id="access-role-color"
+                          type="color"
+                          value={selectedRole.color}
+                          onChange={(e) =>
+                            updateRole(selectedRole.id, { color: e.target.value })
+                          }
+                          disabled={saving}
+                        />
+                        <span className="access-role-color-preview">
+                          <span
+                            className="access-role-color-dot"
+                            style={{ background: selectedRole.color }}
                           />
-                        </label>
-                        {role.id !== "everyone" && role.is_system !== 1 && (
-                          <button
-                            type="button"
-                            className="profile-button secondary"
-                            onClick={() => deleteRole(role.id)}
-                            disabled={saving}
-                          >
-                            Delete
-                          </button>
-                        )}
+                          <span style={{ color: selectedRole.color, fontWeight: 700 }}>
+                            {selectedRole.name}
+                          </span>
+                        </span>
                       </div>
                     </div>
-                  ))}
-                </div>
+                    <div className="access-role-checks">
+                      {CAPABILITY_OPTIONS.map((capability) => (
+                        <label
+                          key={`${selectedRole.id}-${capability.key}`}
+                          className="text-sm access-check-row access-capability-row"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={Boolean(selectedRole[capability.roleField] === 1)}
+                            onChange={(e) => {
+                              const nextPatch = {
+                                [capability.key]: e.target.checked,
+                              } as any;
+                              updateRole(selectedRole.id, nextPatch);
+                            }}
+                            disabled={saving}
+                          />
+                          <span>{capability.label}</span>
+                        </label>
+                      ))}
+                    </div>
+                    <div className="access-role-editor-footer">
+                      <span className="text-xs text-[var(--text-muted)]">
+                        Position {selectedRole.position}
+                        {selectedRole.is_system === 1 ? " - system role" : ""}
+                      </span>
+                      {selectedRole.id !== "everyone" && selectedRole.is_system !== 1 && (
+                        <button
+                          type="button"
+                          className="profile-button secondary"
+                          onClick={() => deleteRole(selectedRole.id)}
+                          disabled={saving}
+                        >
+                          Delete role
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-sm text-[var(--text-muted)]">
+                    No role selected.
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -567,21 +581,23 @@ export default function AccessManagerModal({
             <div className="access-two-pane">
               <div className="profile-section access-pane-list">
                 <div className="profile-section-title">Members</div>
-                {users.map((entry) => (
-                  <button
-                    key={entry.id}
-                    type="button"
-                    className={`access-list-item ${
-                      selectedUser?.id === entry.id ? "active" : ""
-                    }`}
-                    onClick={() => setSelectedUserId(entry.id)}
-                  >
-                    <span>{entry.username}</span>
-                    <span className="text-xs text-[var(--text-muted)]">
-                      {(userRoles[entry.id] || []).length} role(s)
-                    </span>
-                  </button>
-                ))}
+                <div className="access-role-list">
+                  {users.map((entry) => (
+                    <button
+                      key={entry.id}
+                      type="button"
+                      className={`access-list-item access-role-list-item ${
+                        selectedUser?.id === entry.id ? "active" : ""
+                      }`}
+                      onClick={() => setSelectedUserId(entry.id)}
+                    >
+                      <span>{entry.username}</span>
+                      <span className="text-xs text-[var(--text-muted)]">
+                        {(userRoles[entry.id] || []).length} role(s)
+                      </span>
+                    </button>
+                  ))}
+                </div>
               </div>
 
               <div className="profile-section">
@@ -746,12 +762,98 @@ export default function AccessManagerModal({
           )}
         </div>
 
+        {showCreateRoleModal && (
+          <div
+            className="access-create-role-backdrop"
+            onClick={() => setShowCreateRoleModal(false)}
+          >
+            <div
+              className="access-create-role-modal"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="profile-section-title">Create Role</div>
+              <div className="profile-grid">
+                <div>
+                  <label className="profile-label">Name</label>
+                  <input
+                    className="profile-input"
+                    value={newRoleName}
+                    onChange={(e) => setNewRoleName(e.target.value)}
+                    placeholder="Moderator"
+                  />
+                </div>
+                <div>
+                  <label className="profile-label">Color</label>
+                  <div className="access-role-color-input">
+                    <input
+                      type="color"
+                      value={newRoleColor}
+                      onChange={(e) => setNewRoleColor(e.target.value)}
+                    />
+                    <span className="access-role-color-preview">
+                      <span
+                        className="access-role-color-dot"
+                        style={{ background: newRoleColor }}
+                      />
+                      <span style={{ color: newRoleColor, fontWeight: 700 }}>
+                        Preview role
+                      </span>
+                    </span>
+                  </div>
+                </div>
+              </div>
+              <div className="access-role-checks">
+                {CAPABILITY_OPTIONS.map((capability) => (
+                  <label
+                    key={capability.key}
+                    className="text-sm access-check-row access-capability-row"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={Boolean(newRoleCapabilities[capability.key])}
+                      onChange={(e) =>
+                        setNewRoleCapabilities((prev) => ({
+                          ...prev,
+                          [capability.key]: e.target.checked,
+                        }))
+                      }
+                    />
+                    <span>{capability.label}</span>
+                  </label>
+                ))}
+              </div>
+              <div className="access-create-role-actions">
+                <button
+                  type="button"
+                  className="profile-button secondary"
+                  onClick={() => setShowCreateRoleModal(false)}
+                  disabled={saving}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="profile-button"
+                  onClick={createRole}
+                  disabled={saving}
+                >
+                  {saving ? "Creating..." : "Create role"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         <div className="access-manager-footer">
           {error ? (
             <span className="text-sm text-[var(--danger)]">{error}</span>
           ) : (
             <span className="text-sm text-[var(--text-muted)]">
-              {saving ? "Saving changes..." : "Changes apply immediately."}
+              {saving
+                ? "Saving changes..."
+                : activeTab === "rooms"
+                  ? "Room access changes are staged until you click Save room permissions."
+                  : "Changes apply immediately."}
             </span>
           )}
           <button

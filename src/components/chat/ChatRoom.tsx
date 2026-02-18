@@ -1173,7 +1173,7 @@ export default function ChatRoom({
                 transition={{ duration: 0.25, ease: "easeOut" }}
                 className={`flex items-start gap-4 group bg-[var(--bg-secondary)]/80 border border-[var(--border)] rounded-2xl px-5 py-4 shadow-[0_12px_30px_-22px_rgba(0,0,0,0.7)] chat-message${isOwnMessage ? " own" : ""}`}
               >
-                <div className="w-10 h-10 rounded-xl bg-[var(--accent)] flex items-center justify-center text-white text-sm font-bold shrink-0 mt-0.5">
+                <div className="w-10 h-10 rounded-xl bg-[var(--accent)] flex items-center justify-center text-white text-sm font-bold shrink-0 mt-0.5 chat-message-avatar">
                   {displayAvatar ? (
                     <img
                       src={displayAvatar}

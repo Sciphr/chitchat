@@ -49,6 +49,7 @@ export default function Home() {
     token,
     user,
     profile,
+    updateProfile,
     loading,
     signOut,
     serverUrl,
@@ -967,6 +968,20 @@ export default function Home() {
     [rooms]
   );
 
+  const handleStatusChange = useCallback(
+    async (nextStatus: "online" | "away" | "dnd" | "offline") => {
+      if (nextStatus === profile.status) return;
+      const result = await updateProfile({
+        ...profile,
+        status: nextStatus,
+      });
+      if (result.error) {
+        console.warn("Failed to update status:", result.error);
+      }
+    },
+    [profile, updateProfile]
+  );
+
   useEffect(() => {
     if (!isConnected || !user?.id) return;
 
@@ -1137,6 +1152,7 @@ export default function Home() {
           username={profile.username}
           status={profile.status}
           avatarUrl={profile.avatarUrl}
+          onChangeStatus={handleStatusChange}
           voiceParticipants={voiceParticipants}
           onOpenSettings={() => setShowSettings(true)}
           onOpenAccessManager={() => setShowAccessManager(true)}

@@ -1171,6 +1171,74 @@ body {
   color: var(--text-muted);
 }
 
+.sidebar-user-status-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.sidebar-user-status-trigger {
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  padding: 2px 6px;
+  margin-left: -6px;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.sidebar-user-status-trigger:hover {
+  border-color: var(--border-light);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.sidebar-user-status-caret {
+  color: var(--text-muted);
+  transition: transform 0.15s ease;
+}
+
+.sidebar-user-status-caret.open {
+  transform: rotate(180deg);
+}
+
+.sidebar-status-menu {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  width: 180px;
+  padding: 6px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.42);
+  z-index: 20;
+}
+
+.sidebar-status-menu-item {
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  padding: 7px 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  text-align: left;
+}
+
+.sidebar-status-menu-item:hover {
+  border-color: var(--border-light);
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.sidebar-status-menu-item.active {
+  border-color: rgba(124, 106, 255, 0.35);
+  background: rgba(124, 106, 255, 0.16);
+  color: var(--text-primary);
+}
+
 /* DM entries in left sidebar */
 .sidebar-dm-avatar {
   display: inline-flex;
@@ -1861,6 +1929,10 @@ body {
   margin: 6px 0;
   position: relative;
   overflow: visible;
+}
+
+.chat-message-avatar {
+  margin-left: 2px;
 }
 
 .chat-message.own {
@@ -3362,9 +3434,8 @@ body {
 }
 
 .access-role-color-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
+  display: grid;
+  gap: 8px;
 }
 
 .access-role-flags {
@@ -3375,7 +3446,7 @@ body {
 
 .access-role-list {
   display: grid;
-  gap: 10px;
+  gap: 8px;
 }
 
 .access-role-row {
@@ -3396,6 +3467,103 @@ body {
 .access-role-checks,
 .access-room-checks {
   display: grid;
+  gap: 10px;
+}
+
+.access-roles-pane {
+  align-items: start;
+}
+
+.access-role-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  gap: 8px;
+}
+
+.access-role-list-item {
+  margin-bottom: 0;
+}
+
+.access-role-list-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.access-role-color-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  display: inline-flex;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35) inset;
+}
+
+.access-role-editor {
+  display: grid;
+  gap: 14px;
+}
+
+.access-role-color-input {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.access-role-color-preview {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.access-capability-row {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+  padding: 8px 10px;
+  cursor: pointer;
+}
+
+.access-capability-row span {
+  cursor: pointer;
+}
+
+.access-role-editor-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.access-create-role-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.52);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 120;
+}
+
+.access-create-role-modal {
+  width: min(520px, calc(100vw - 40px));
+  max-height: min(80vh, 760px);
+  overflow-y: auto;
+  padding: 16px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  display: grid;
+  gap: 12px;
+  box-shadow: 0 24px 48px -28px rgba(0, 0, 0, 0.72);
+}
+
+.access-create-role-actions {
+  display: flex;
+  justify-content: flex-end;
   gap: 10px;
 }
 

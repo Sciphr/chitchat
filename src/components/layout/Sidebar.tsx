@@ -39,6 +39,7 @@ interface SidebarProps {
   username: string;
   status: "online" | "offline" | "away" | "dnd";
   avatarUrl: string;
+  onChangeStatus: (status: "online" | "offline" | "away" | "dnd") => void;
   voiceParticipants: Record<
     string,
     Array<{ id: string; name: string; isSpeaking: boolean }>
@@ -83,6 +84,7 @@ export default function Sidebar({
   username,
   status,
   avatarUrl,
+  onChangeStatus,
   voiceParticipants,
   onOpenSettings,
   onOpenAccessManager,
@@ -154,7 +156,9 @@ export default function Sidebar({
     left: 0,
   });
   const [draggedRoomId, setDraggedRoomId] = useState<string | null>(null);
+  const [showStatusMenu, setShowStatusMenu] = useState(false);
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
+  const statusMenuRef = useRef<HTMLDivElement | null>(null);
   const CONTEXT_MENU_MARGIN = 8;
 
   const channelRooms = rooms.filter((r) => r.type === "text" || r.type === "voice");
@@ -238,6 +242,23 @@ export default function Sidebar({
       window.removeEventListener("keydown", onEscape);
     };
   }, [contextMenu]);
+
+  useEffect(() => {
+    if (!showStatusMenu) return;
+    function handleClick(event: MouseEvent) {
+      if (statusMenuRef.current?.contains(event.target as Node)) return;
+      setShowStatusMenu(false);
+    }
+    function onEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setShowStatusMenu(false);
+    }
+    window.addEventListener("mousedown", handleClick);
+    window.addEventListener("keydown", onEscape);
+    return () => {
+      window.removeEventListener("mousedown", handleClick);
+      window.removeEventListener("keydown", onEscape);
+    };
+  }, [showStatusMenu]);
 
   useLayoutEffect(() => {
     if (!contextMenu || !contextMenuRef.current) return;
@@ -334,6 +355,12 @@ export default function Sidebar({
   };
 
   const currentStatus = statusMap[status] || statusMap.online;
+  const statusOptions = (["online", "away", "dnd", "offline"] as const).map(
+    (value) => ({
+      value,
+      ...statusMap[value],
+    })
+  );
   const serverStatusLabel = serverMaintenanceMode
     ? "Maintenance mode"
     : isServerConnected
@@ -1532,14 +1559,57 @@ export default function Sidebar({
           </div>
           <div className="sidebar-user-info">
             <div className="sidebar-user-name">{username}</div>
-            <div className="sidebar-user-status">
-              <span
-                className="sidebar-user-status-dot"
-                style={{ background: currentStatus.color }}
-              />
-              <span className="sidebar-user-status-label">
-                {currentStatus.label}
-              </span>
+            <div
+              className="sidebar-user-status-wrap"
+              ref={statusMenuRef}
+              onClick={(event) => event.stopPropagation()}
+              onKeyDown={(event) => event.stopPropagation()}
+            >
+              <button
+                type="button"
+                className="sidebar-user-status sidebar-user-status-trigger"
+                onClick={() => setShowStatusMenu((prev) => !prev)}
+                aria-haspopup="menu"
+                aria-expanded={showStatusMenu}
+                title="Change status"
+              >
+                <span
+                  className="sidebar-user-status-dot"
+                  style={{ background: currentStatus.color }}
+                />
+                <span className="sidebar-user-status-label">
+                  {currentStatus.label}
+                </span>
+                <ChevronDown
+                  size={12}
+                  className={`sidebar-user-status-caret ${showStatusMenu ? "open" : ""}`}
+                />
+              </button>
+              {showStatusMenu && (
+                <div className="sidebar-status-menu" role="menu" aria-label="Change status">
+                  {statusOptions.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={status === option.value}
+                      className={`sidebar-status-menu-item ${
+                        status === option.value ? "active" : ""
+                      }`}
+                      onClick={() => {
+                        onChangeStatus(option.value);
+                        setShowStatusMenu(false);
+                      }}
+                    >
+                      <span
+                        className="sidebar-user-status-dot"
+                        style={{ background: option.color }}
+                      />
+                      <span>{option.label}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         </div>
