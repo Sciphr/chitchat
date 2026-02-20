@@ -15,6 +15,7 @@ import type { Room, RoomCategory, ServerUser, VoiceControls } from "../types";
 import { playDmNotification, playTextNotification } from "../lib/sounds";
 import { detectRunningGame } from "../lib/gamePresence";
 import { applyRemoteControlInputNative } from "../lib/remoteControlNative";
+import { setLiveKitUrl } from "../lib/livekit";
 
 type NotificationMode = "all" | "mentions" | "mute";
 type RemoteControlIncomingRequest = {
@@ -199,7 +200,11 @@ export default function Home() {
           serverAnnouncement?: string;
           serverAnnouncementId?: string;
           gifs?: { enabled?: boolean };
+          livekitUrl?: string;
         };
+        if (typeof data.livekitUrl === "string") {
+          setLiveKitUrl(data.livekitUrl, serverUrl);
+        }
         setServerInfo({
           name: data.name || "Server",
           maintenanceMode: Boolean(data.maintenanceMode),
