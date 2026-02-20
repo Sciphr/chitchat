@@ -2,12 +2,15 @@ import { useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Bug, Heart, Minus, RefreshCw, Square, X } from "lucide-react";
 
+const TRAY_HINT_KEY = "chitchat-tray-hint-shown";
+
 const appWindow = getCurrentWindow();
 
 export default function TitleBar() {
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [updateStatus, setUpdateStatus] = useState("");
   const [showIssueConfirm, setShowIssueConfirm] = useState(false);
+  const [showTrayHint, setShowTrayHint] = useState(false);
   const [updateStatusKind, setUpdateStatusKind] = useState<
     "info" | "success" | "error"
   >("info");
@@ -149,13 +152,34 @@ export default function TitleBar() {
           </button>
           <button
             className="titlebar-btn titlebar-btn-close"
-            onClick={() => appWindow.close()}
+            onClick={() => {
+              if (isDesktop) {
+                if (!localStorage.getItem(TRAY_HINT_KEY)) {
+                  localStorage.setItem(TRAY_HINT_KEY, "1");
+                  setShowTrayHint(true);
+                  setTimeout(() => {
+                    setShowTrayHint(false);
+                    void appWindow.hide();
+                  }, 3000);
+                } else {
+                  void appWindow.hide();
+                }
+              } else {
+                void appWindow.close();
+              }
+            }}
             aria-label="Close"
           >
             <X size={14} />
           </button>
         </div>
       </div>
+
+      {showTrayHint && (
+        <div className="tray-hint-banner">
+          <span>ChitChat is running in the system tray. Right-click the tray icon to quit.</span>
+        </div>
+      )}
 
       {showIssueConfirm && (
         <div className="titlebar-modal-overlay" onClick={() => setShowIssueConfirm(false)}>

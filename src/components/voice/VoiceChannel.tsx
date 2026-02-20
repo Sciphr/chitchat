@@ -508,6 +508,9 @@ function VoiceRoomContent({
 
   // Report participants upward + play join/leave sounds for remote participants
   const prevCountRef = useRef(0);
+  const participantsRef = useRef(participants);
+  participantsRef.current = participants;
+
   useEffect(() => {
     if (!onParticipantsChange) return;
     const dedupedById = new Map<string, VoiceParticipant>();
@@ -517,7 +520,6 @@ function VoiceRoomContent({
       const mappedParticipant: VoiceParticipant = {
         id,
         name: participant.name || id,
-        // Use audioLevel as an immediate hint to reduce speaking-indicator lag.
         isSpeaking:
           (participant.audioLevel ?? 0) > 0.02 ||
           (participant.isSpeaking ?? false),
@@ -533,6 +535,30 @@ function VoiceRoomContent({
     else if (newCount < prevCount) playLeave();
     prevCountRef.current = newCount;
   }, [participants, onParticipantsChange, roomId]);
+
+  // Fast speaking indicator: fire immediately on ActiveSpeakersChanged event
+  // instead of waiting for useParticipants() to re-render.
+  useEffect(() => {
+    if (!onParticipantsChange) return;
+    function onActiveSpeakersChanged(speakers: { identity: string }[]) {
+      const speakingIds = new Set(speakers.map((s) => s.identity));
+      const dedupedById = new Map<string, VoiceParticipant>();
+      for (const participant of participantsRef.current) {
+        const id = participant.identity?.trim();
+        if (!id) continue;
+        dedupedById.set(id, {
+          id,
+          name: participant.name || id,
+          isSpeaking: speakingIds.has(id) || (participant.audioLevel ?? 0) > 0.02,
+        });
+      }
+      onParticipantsChange(roomId, Array.from(dedupedById.values()));
+    }
+    room.on(RoomEvent.ActiveSpeakersChanged, onActiveSpeakersChanged);
+    return () => {
+      room.off(RoomEvent.ActiveSpeakersChanged, onActiveSpeakersChanged);
+    };
+  }, [room, onParticipantsChange, roomId]);
 
   // Sync screen share state when user stops sharing via browser UI
   useEffect(() => {
@@ -774,6 +800,10 @@ function VoiceRoomContent({
         maxScreenShareResolution: mediaLimits.maxScreenShareResolution,
         maxScreenShareFps: mediaLimits.maxScreenShareFps,
       },
+      participantVolumes,
+      setParticipantVolume: (participantId: string, volume: number) => {
+        setParticipantVolumes((prev) => ({ ...prev, [participantId]: volume }));
+      },
     });
   }, [
     isConnected,
@@ -796,6 +826,7 @@ function VoiceRoomContent({
     handleLeave,
     onVoiceControlsChange,
     mediaLimits,
+    participantVolumes,
     roomId,
   ]);
 
@@ -942,40 +973,6 @@ function VoiceRoomContent({
         </div>
       )}
 
-      {remoteParticipants.length > 0 && (
-        <div className="voice-mix-card">
-          <div className="voice-mix-title">Participant Volume</div>
-          <div className="voice-mix-list">
-            {remoteParticipants.map((participant) => {
-              const name = participant.name || participant.identity;
-              const volume = participantVolumes[participant.identity] ?? 1;
-              return (
-                <div key={participant.identity} className="voice-mix-row">
-                  <span className="voice-mix-name" title={name}>
-                    {name}
-                  </span>
-                  <input
-                    type="range"
-                    min={0}
-                    max={100}
-                    step={1}
-                    className="voice-mix-slider"
-                    value={Math.round(volume * 100)}
-                    onChange={(event) => {
-                      const nextVolume = Number(event.target.value) / 100;
-                      setParticipantVolumes((prev) => ({
-                        ...prev,
-                        [participant.identity]: nextVolume,
-                      }));
-                    }}
-                  />
-                  <span className="voice-mix-value">{Math.round(volume * 100)}%</span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
 
       {pushToTalkEnabled && (
         <div className="voice-ptt">Hold {formattedKey} to talk</div>

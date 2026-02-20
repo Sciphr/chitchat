@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { io, type Socket } from "socket.io-client";
 import { ChevronLeft } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
 import Sidebar from "../components/layout/Sidebar";
 import MemberList from "../components/layout/MemberList";
 import PublicProfileModal from "../components/profile/PublicProfileModal";
@@ -9,6 +10,7 @@ import AccessManagerModal from "../components/admin/AccessManagerModal";
 import ChatRoom from "../components/chat/ChatRoom";
 import VoiceChannel from "../components/voice/VoiceChannel";
 import Settings from "./Settings";
+import ToastNotifications, { type Toast } from "../components/notifications/ToastNotifications";
 import { useSocket } from "../hooks/useSocket";
 import { useAuth } from "../hooks/useAuth";
 import type { Room, RoomCategory, ServerUser, VoiceControls } from "../types";
@@ -16,6 +18,8 @@ import { playDmNotification, playTextNotification } from "../lib/sounds";
 import { detectRunningGame } from "../lib/gamePresence";
 import { applyRemoteControlInputNative } from "../lib/remoteControlNative";
 import { setLiveKitUrl } from "../lib/livekit";
+
+const isDesktop = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 type NotificationMode = "all" | "mentions" | "mute";
 type RemoteControlIncomingRequest = {
@@ -96,6 +100,11 @@ export default function Home() {
     ownerUserId: string;
     participantIds: string[];
   } | null>(null);
+  const [incomingCallNotification, setIncomingCallNotification] = useState<{
+    room: Room;
+    ownerUserId: string;
+    participantIds: string[];
+  } | null>(null);
   const [serverInfo, setServerInfo] = useState<{
     name: string;
     maintenanceMode: boolean;
@@ -104,7 +113,25 @@ export default function Home() {
     serverAnnouncementId?: string;
     gifsEnabled?: boolean;
   } | null>(null);
+  const [voiceSidebarCtxMenu, setVoiceSidebarCtxMenu] = useState<{
+    x: number;
+    y: number;
+    user: ServerUser | null;
+    participantId: string;
+  } | null>(null);
+  const voiceSidebarCtxMenuRef = useRef<HTMLDivElement | null>(null);
+  const [voiceSidebarCtxBusy, setVoiceSidebarCtxBusy] = useState(false);
+  const [groupDMPicker, setGroupDMPicker] = useState<{ baseDmRoom: Room } | null>(null);
+  const [groupDMSelectedIds, setGroupDMSelectedIds] = useState<string[]>([]);
+  const [toasts, setToasts] = useState<Toast[]>([]);
+
+  // Local client-only notification prefs (stored in localStorage, not synced to server)
+  const [soundEnabled, setSoundEnabled] = useState(true);
+  const [inAppToastsEnabled, setInAppToastsEnabled] = useState(true);
+  const [inAppToastsMentionsOnly, setInAppToastsMentionsOnly] = useState(false);
+
   const lastNotificationSoundAtRef = useRef(0);
+  const activeRoomRef = useRef<Room | null>(null);
   const lastDesktopNotificationAtRef = useRef(0);
   const lastNonCallRoomRef = useRef<Room | null>(null);
   const lastSentGameActivityRef = useRef<string | null>(null);
@@ -172,6 +199,34 @@ export default function Home() {
     () => dmRooms.filter((room) => !hiddenDmByRoomId[room.id]),
     [dmRooms, hiddenDmByRoomId]
   );
+
+  // Local notification prefs — stored in localStorage, no server round-trip
+  const localPrefsKey = useMemo(
+    () => `chitchat-local-prefs:${user?.id ?? "anon"}`,
+    [user?.id]
+  );
+
+  useEffect(() => {
+    if (!user?.id) return;
+    try {
+      const raw = localStorage.getItem(localPrefsKey);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as Record<string, boolean>;
+      if (typeof parsed.soundEnabled === "boolean") setSoundEnabled(parsed.soundEnabled);
+      if (typeof parsed.inAppToastsEnabled === "boolean") setInAppToastsEnabled(parsed.inAppToastsEnabled);
+      if (typeof parsed.inAppToastsMentionsOnly === "boolean") setInAppToastsMentionsOnly(parsed.inAppToastsMentionsOnly);
+    } catch {
+      // ignore
+    }
+  }, [localPrefsKey, user?.id]);
+
+  useEffect(() => {
+    if (!user?.id) return;
+    localStorage.setItem(
+      localPrefsKey,
+      JSON.stringify({ soundEnabled, inAppToastsEnabled, inAppToastsMentionsOnly })
+    );
+  }, [localPrefsKey, soundEnabled, inAppToastsEnabled, inAppToastsMentionsOnly, user?.id]);
 
   function toggleMemberList() {
     setMemberListOpen((prev) => {
@@ -435,15 +490,15 @@ export default function Home() {
     socket.emit(
       "call:start",
       { targetUserId: targetUser.id },
-      (ack?: { ok: boolean; room?: Room }) => {
+      (ack?: { ok: boolean; room?: Room; error?: string }) => {
         if (!ack?.ok || !ack.room) return;
-        setActiveCall((prev) => ({
+        setActiveCall({
           room: ack.room as Room,
           ownerUserId: user?.id || "",
-          participantIds: prev?.participantIds || [user?.id || "", targetUser.id].filter(Boolean),
-        }));
-        setActiveRoom(ack.room);
-        setPendingAutoJoinVoiceRoomId(ack.room.id);
+          participantIds: [user?.id || "", targetUser.id].filter(Boolean),
+        });
+        // Don't switch activeRoom — show voice call as inline panel
+        setPendingAutoJoinVoiceRoomId((ack.room as Room).id);
       }
     );
   }
@@ -466,6 +521,19 @@ export default function Home() {
   function handleLeaveCall() {
     if (!activeCall) return;
     socket.emit("call:leave", { roomId: activeCall.room.id });
+  }
+
+  function acceptIncomingCall() {
+    if (!incomingCallNotification) return;
+    setPendingAutoJoinVoiceRoomId(incomingCallNotification.room.id);
+    setIncomingCallNotification(null);
+  }
+
+  function declineIncomingCall() {
+    if (!incomingCallNotification) return;
+    socket.emit("call:leave", { roomId: incomingCallNotification.room.id });
+    setActiveCall((prev) => (prev?.room.id === incomingCallNotification.room.id ? null : prev));
+    setIncomingCallNotification(null);
   }
 
   const handleParticipantsChange = useCallback(
@@ -521,6 +589,95 @@ export default function Home() {
     },
     [socket, user?.id]
   );
+
+  const handleStartGroupDMPicker = useCallback((room: Room) => {
+    setGroupDMPicker({ baseDmRoom: room });
+    setGroupDMSelectedIds([]);
+  }, []);
+
+  const handleCreateGroupDM = useCallback(
+    (memberIds: string[]) => {
+      if (!memberIds.length) return;
+      socket.emit(
+        "dm:create-group",
+        { memberIds },
+        (ack?: { ok: boolean; room?: Room }) => {
+          if (!ack?.ok || !ack.room) return;
+          setHiddenDmByRoomId((prev) => {
+            if (!prev[ack.room!.id]) return prev;
+            const next = { ...prev };
+            delete next[ack.room!.id];
+            return next;
+          });
+          setDmRooms((prev) => {
+            if (prev.some((r) => r.id === ack.room!.id)) return prev;
+            return [ack.room!, ...prev];
+          });
+          setActiveRoom(ack.room);
+        }
+      );
+    },
+    [socket]
+  );
+
+  const handleVoiceParticipantContextMenu = useCallback(
+    (participantId: string, x: number, y: number) => {
+      const foundUser = serverUsers.find((u) => u.id === participantId) ?? null;
+      setVoiceSidebarCtxMenu({ x, y, user: foundUser, participantId });
+    },
+    [serverUsers]
+  );
+
+  // Close voice sidebar context menu on outside click or Escape
+  useEffect(() => {
+    if (!voiceSidebarCtxMenu) return;
+    function close(e: MouseEvent) {
+      if (!voiceSidebarCtxMenuRef.current?.contains(e.target as Node)) {
+        setVoiceSidebarCtxMenu(null);
+      }
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setVoiceSidebarCtxMenu(null);
+    }
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [voiceSidebarCtxMenu]);
+
+  // Clamp voice sidebar context menu to viewport
+  useLayoutEffect(() => {
+    if (!voiceSidebarCtxMenu || !voiceSidebarCtxMenuRef.current) return;
+    const MARGIN = 8;
+    const rect = voiceSidebarCtxMenuRef.current.getBoundingClientRect();
+    let nextX = voiceSidebarCtxMenu.x;
+    let nextY = voiceSidebarCtxMenu.y;
+    if (rect.right > window.innerWidth - MARGIN) nextX -= rect.right - (window.innerWidth - MARGIN);
+    if (rect.bottom > window.innerHeight - MARGIN) nextY -= rect.bottom - (window.innerHeight - MARGIN);
+    if (rect.left < MARGIN) nextX += MARGIN - rect.left;
+    if (rect.top < MARGIN) nextY += MARGIN - rect.top;
+    if (nextX !== voiceSidebarCtxMenu.x || nextY !== voiceSidebarCtxMenu.y) {
+      setVoiceSidebarCtxMenu((prev) => (prev ? { ...prev, x: nextX, y: nextY } : prev));
+    }
+  }, [voiceSidebarCtxMenu]);
+
+  function runVoiceCtxModeration(
+    targetUserId: string,
+    action: "kick" | "ban" | "server-mute" | "server-unmute" | "server-deafen" | "server-undeafen" | "timeout" | "clear-timeout",
+    durationMinutes?: number
+  ) {
+    setVoiceSidebarCtxBusy(true);
+    socket.emit(
+      "user:moderation:action",
+      { userId: targetUserId, action, durationMinutes },
+      (ack?: { ok: boolean; error?: string }) => {
+        setVoiceSidebarCtxBusy(false);
+        if (ack?.ok) setVoiceSidebarCtxMenu(null);
+      }
+    );
+  }
 
   async function handleSignOut() {
     // Disconnect from voice channel first if connected
@@ -779,7 +936,17 @@ export default function Home() {
     if (!activeRoom?.is_temporary) {
       lastNonCallRoomRef.current = activeRoom;
     }
+    activeRoomRef.current = activeRoom;
   }, [activeRoom]);
+
+  const addToast = useCallback((toast: Omit<Toast, "id">) => {
+    const id = crypto.randomUUID();
+    setToasts((prev) => [...prev.slice(-2), { ...toast, id }]);
+  }, []);
+
+  const dismissToast = useCallback((id: string) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
 
   useEffect(() => {
     if (!isConnected) return;
@@ -796,18 +963,25 @@ export default function Home() {
         participantIds: payload.participantIds || [],
       });
       if (payload.participantIds?.includes(user?.id || "")) {
-        setActiveRoom((prev) => {
-          if (prev?.id === payload.room.id) return prev;
-          if (prev && !prev.is_temporary) lastNonCallRoomRef.current = prev;
-          return payload.room;
-        });
-        setPendingAutoJoinVoiceRoomId(payload.room.id);
+        const isCaller = payload.ownerUserId === (user?.id || "");
+        if (isCaller) {
+          // Caller: keep current view, show voice as inline panel
+          setPendingAutoJoinVoiceRoomId(payload.room.id);
+        } else {
+          // Target: show incoming call notification popup
+          setIncomingCallNotification({
+            room: payload.room,
+            ownerUserId: payload.ownerUserId,
+            participantIds: payload.participantIds || [],
+          });
+        }
       }
     }
 
     function onCallEnded(payload: { roomId: string }) {
       if (!payload?.roomId) return;
       setActiveCall((prev) => (prev?.room.id === payload.roomId ? null : prev));
+      setIncomingCallNotification((prev) => (prev?.room.id === payload.roomId ? null : prev));
       setPendingAutoJoinVoiceRoomId((prev) => (prev === payload.roomId ? null : prev));
       setConnectedVoiceRoomId((prev) => (prev === payload.roomId ? null : prev));
       setActiveRoom((prev) => {
@@ -871,12 +1045,14 @@ export default function Home() {
     function onMessageNotify(payload: {
       room_id: string;
       user_id: string;
+      username?: string;
       content: string;
+      avatar_url?: string;
       created_at: string;
     }) {
       if (!payload?.room_id) return;
       if (payload.user_id === user?.id) return;
-      if (activeRoom?.id === payload.room_id) return;
+      if (activeRoomRef.current?.id === payload.room_id) return;
 
       const room =
         rooms.find((entry) => entry.id === payload.room_id) ||
@@ -894,7 +1070,6 @@ export default function Home() {
       const shouldNotifyByRoom =
         notificationMode === "all" ||
         (notificationMode === "mentions" && mentioned);
-      const shouldPlaySound = shouldNotifyByRoom;
       const shouldDesktopNotifyByProfile =
         !profile.desktopNotificationsMentionsOnly || mentioned || room?.type === "dm";
       const canDesktopNotify =
@@ -906,7 +1081,7 @@ export default function Home() {
         Notification.permission === "granted" &&
         document.visibilityState !== "visible";
 
-      if (shouldPlaySound) {
+      if (shouldNotifyByRoom && soundEnabled) {
         const now = Date.now();
         if (now - lastNotificationSoundAtRef.current > 550) {
           if (room?.type === "dm") playDmNotification();
@@ -935,6 +1110,25 @@ export default function Home() {
         }
       }
 
+      // In-app toast — only when app is in background
+      const isAppBackground = document.visibilityState !== "visible";
+      const shouldShowToast =
+        inAppToastsEnabled &&
+        shouldNotifyByRoom &&
+        isAppBackground &&
+        (!inAppToastsMentionsOnly || mentioned || room?.type === "dm");
+      if (shouldShowToast) {
+        addToast({
+          roomId: payload.room_id,
+          title: room?.type === "dm"
+            ? (payload.username || "Direct Message")
+            : `#${room?.name ?? "channel"}`,
+          body: (payload.content || "(attachment)").trim().slice(0, 100),
+          avatarUrl: payload.avatar_url,
+          isDm: room?.type === "dm",
+        });
+      }
+
       setUnreadByRoom((prev) => ({
         ...prev,
         [payload.room_id]: (prev[payload.room_id] ?? 0) + 1,
@@ -960,7 +1154,6 @@ export default function Home() {
   }, [
     isConnected,
     socket,
-    activeRoom?.id,
     profile.username,
     user?.id,
     rooms,
@@ -968,6 +1161,10 @@ export default function Home() {
     notificationModesByRoom,
     profile.desktopNotificationsEnabled,
     profile.desktopNotificationsMentionsOnly,
+    soundEnabled,
+    inAppToastsEnabled,
+    inAppToastsMentionsOnly,
+    addToast,
   ]);
 
   const handleHideDM = useCallback(
@@ -1090,6 +1287,17 @@ export default function Home() {
     };
   }, []);
 
+  // Tray badge: update tooltip with total unread count
+  const totalUnread = useMemo(
+    () => Object.values(unreadByRoom).reduce((a, b) => a + b, 0),
+    [unreadByRoom]
+  );
+
+  useEffect(() => {
+    if (!isDesktop) return;
+    invoke("set_tray_badge", { count: totalUnread }).catch(() => {});
+  }, [totalUnread]);
+
   const activeVoiceRoom =
     activeRoom && activeRoom.type === "voice" ? activeRoom : null;
   const connectedVoiceRoom = useMemo(() => {
@@ -1097,7 +1305,13 @@ export default function Home() {
     if (activeVoiceRoom?.id === connectedVoiceRoomId) return activeVoiceRoom;
     return rooms.find((room) => room.type === "voice" && room.id === connectedVoiceRoomId) ?? null;
   }, [connectedVoiceRoomId, activeVoiceRoom, rooms]);
-  const voiceSessionRoom = connectedVoiceRoom || activeVoiceRoom;
+  // Also use the active DM call room even if it's not the activeRoom
+  const callRoom = useMemo(() => {
+    if (!activeCall) return null;
+    if ((activeCall.participantIds || []).includes(user?.id || "")) return activeCall.room;
+    return null;
+  }, [activeCall, user?.id]);
+  const voiceSessionRoom = connectedVoiceRoom || activeVoiceRoom || callRoom;
   const mentionableUsernames = useMemo(() => {
     const set = new Set<string>();
     for (const serverUser of serverUsers) {
@@ -1119,7 +1333,7 @@ export default function Home() {
   const canManageMessages = Boolean(user?.permissions.canManageMessages || user?.isAdmin);
   const canUseEmojis = Boolean(user?.permissions.canUseEmojis ?? true);
   const canCreateRooms = Boolean(
-    canManageChannels || serverInfo?.userCanCreateRooms !== false
+    canManageChannels || serverInfo?.userCanCreateRooms === true
   );
   const announcementId = serverInfo?.serverAnnouncementId || "";
   const announcementText = (serverInfo?.serverAnnouncement || "").trim();
@@ -1188,6 +1402,8 @@ export default function Home() {
           canCreateRooms={canCreateRooms}
           canManageChannels={canManageChannels}
           canManageRoles={canManageRoles}
+          onVoiceParticipantContextMenu={handleVoiceParticipantContextMenu}
+          onStartGroupDM={handleStartGroupDMPicker}
         />
 
         {/* Main content area */}
@@ -1224,39 +1440,25 @@ export default function Home() {
                 </button>
               </div>
             )}
-            {activeRoom ? (
-              activeRoom.type === "text" || activeRoom.type === "dm" ? (
-                <ChatRoom
-                  room={activeRoom}
-                  socket={socket}
-                  isConnected={isConnected}
-                  currentUserId={user?.id ?? null}
-                  currentUsername={profile.username}
-                  currentAvatarUrl={profile.avatarUrl}
-                  isAdmin={user?.isAdmin ?? false}
-                  canManageMessages={canManageMessages}
-                  canPinMessages={canPinMessages}
-                  canUseEmojis={canUseEmojis}
-                  canUseGifs={Boolean(serverInfo?.gifsEnabled)}
-                  unreadCount={unreadByRoom[activeRoom.id] ?? 0}
-                  firstUnreadAt={firstUnreadAtByRoom[activeRoom.id]}
-                  onMarkRead={markRoomRead}
-                  notificationMode={notificationModesByRoom[activeRoom.id] ?? "all"}
-                  onNotificationModeChange={(mode) =>
-                    setRoomNotificationMode(activeRoom.id, mode)
-                  }
-                  mentionableUsernames={mentionableUsernames}
-                />
-              ) : null
-            ) : (
-              <div className="flex-1 flex items-center justify-center text-[var(--text-muted)]">
-                Select a channel to get started
-              </div>
-            )}
+            {/* Incoming call notification */}
+            {incomingCallNotification && (() => {
+              const callerUser = serverUsers.find((u) => u.id === incomingCallNotification.ownerUserId);
+              const callerName = callerUser?.username || "Someone";
+              return (
+                <div className="incoming-call-banner">
+                  <span className="incoming-call-icon">📞</span>
+                  <span className="incoming-call-text">Incoming call from <strong>{callerName}</strong></span>
+                  <button type="button" className="incoming-call-accept" onClick={acceptIncomingCall}>Accept</button>
+                  <button type="button" className="incoming-call-decline" onClick={declineIncomingCall}>Decline</button>
+                </div>
+              );
+            })()}
+            {/* Voice channel — fullscreen for regular voice rooms, mini panel for DM calls */}
             {voiceSessionRoom && (
               <div
-                className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden"
-                style={{ display: activeRoom?.type === "voice" ? undefined : "none" }}
+                className={`flex flex-col min-w-0 overflow-hidden ${
+                  activeRoom?.type === "voice" ? "flex-1 min-h-0" : "voice-call-mini"
+                }`}
               >
                 <VoiceChannel
                   key={voiceSessionRoom.id}
@@ -1277,6 +1479,33 @@ export default function Home() {
                 />
               </div>
             )}
+            {activeRoom && (activeRoom.type === "text" || activeRoom.type === "dm") ? (
+              <ChatRoom
+                room={activeRoom}
+                socket={socket}
+                isConnected={isConnected}
+                currentUserId={user?.id ?? null}
+                currentUsername={profile.username}
+                currentAvatarUrl={profile.avatarUrl}
+                isAdmin={user?.isAdmin ?? false}
+                canManageMessages={canManageMessages}
+                canPinMessages={canPinMessages}
+                canUseEmojis={canUseEmojis}
+                canUseGifs={Boolean(serverInfo?.gifsEnabled)}
+                unreadCount={unreadByRoom[activeRoom.id] ?? 0}
+                firstUnreadAt={firstUnreadAtByRoom[activeRoom.id]}
+                onMarkRead={markRoomRead}
+                notificationMode={notificationModesByRoom[activeRoom.id] ?? "all"}
+                onNotificationModeChange={(mode) =>
+                  setRoomNotificationMode(activeRoom.id, mode)
+                }
+                mentionableUsernames={mentionableUsernames}
+              />
+            ) : !activeRoom && !voiceSessionRoom ? (
+              <div className="flex-1 flex items-center justify-center text-[var(--text-muted)]">
+                Select a channel to get started
+              </div>
+            ) : null}
           </div>
         </main>
 
@@ -1337,7 +1566,15 @@ export default function Home() {
       </div>
 
       {showSettings && (
-        <Settings onClose={() => setShowSettings(false)} />
+        <Settings
+          onClose={() => setShowSettings(false)}
+          soundEnabled={soundEnabled}
+          onSoundEnabledChange={setSoundEnabled}
+          inAppToastsEnabled={inAppToastsEnabled}
+          onInAppToastsEnabledChange={setInAppToastsEnabled}
+          inAppToastsMentionsOnly={inAppToastsMentionsOnly}
+          onInAppToastsMentionsOnlyChange={setInAppToastsMentionsOnly}
+        />
       )}
       {showAccessManager && (
         <AccessManagerModal
@@ -1398,6 +1635,219 @@ export default function Home() {
           </div>
         </div>
       )}
+
+      {/* Voice participant right-click context menu (triggered from sidebar) */}
+      {voiceSidebarCtxMenu && (() => {
+        const ctxUser = voiceSidebarCtxMenu.user;
+        const isSelf = ctxUser?.id === user?.id;
+        const isCallOwner = activeCall?.ownerUserId === user?.id;
+        const inActiveCall = activeCall?.participantIds.includes(voiceSidebarCtxMenu.participantId);
+        const vol = voiceControls?.participantVolumes[voiceSidebarCtxMenu.participantId] ?? 1;
+        return (
+          <div
+            ref={voiceSidebarCtxMenuRef}
+            className="member-context-menu"
+            style={{ top: voiceSidebarCtxMenu.y, left: voiceSidebarCtxMenu.x }}
+          >
+            {ctxUser && !isSelf && (
+              <button
+                type="button"
+                className="member-context-menu-item"
+                onClick={() => { handleOpenDM(ctxUser); setVoiceSidebarCtxMenu(null); }}
+              >
+                Send Direct Message
+              </button>
+            )}
+            {ctxUser && (
+              <button
+                type="button"
+                className="member-context-menu-item"
+                onClick={() => { setViewedProfile(ctxUser); setVoiceSidebarCtxMenu(null); }}
+              >
+                View Profile
+              </button>
+            )}
+            {ctxUser && !isSelf && !activeCall && (
+              <button
+                type="button"
+                className="member-context-menu-item"
+                onClick={() => { handleStartCall(ctxUser); setVoiceSidebarCtxMenu(null); }}
+              >
+                Start Call
+              </button>
+            )}
+            {ctxUser && !isSelf && activeCall && isCallOwner && (
+              inActiveCall ? (
+                <button
+                  type="button"
+                  className="member-context-menu-item"
+                  onClick={() => { handleRemoveFromCall(ctxUser); setVoiceSidebarCtxMenu(null); }}
+                >
+                  Remove from Call
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="member-context-menu-item"
+                  onClick={() => { handleAddToCall(ctxUser); setVoiceSidebarCtxMenu(null); }}
+                >
+                  Add to Call
+                </button>
+              )
+            )}
+            {voiceControls && !isSelf && (
+              <div className="voice-ctx-volume-row">
+                <span className="voice-ctx-volume-label">Volume</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  step={1}
+                  className="voice-ctx-volume-slider"
+                  value={Math.round(vol * 100)}
+                  onChange={(e) =>
+                    voiceControls.setParticipantVolume(
+                      voiceSidebarCtxMenu.participantId,
+                      Number(e.target.value) / 100
+                    )
+                  }
+                />
+                <span className="voice-ctx-volume-value">{Math.round(vol * 100)}%</span>
+              </div>
+            )}
+            {ctxUser && !isSelf && (canKickMembers || canBanMembers || canTimeoutMembers || canModerateVoice) && (
+              <>
+                <div className="member-context-menu-note" style={{ marginTop: 4 }}>Moderation</div>
+                {canKickMembers && (
+                  <button
+                    type="button"
+                    className="member-context-menu-item"
+                    disabled={voiceSidebarCtxBusy}
+                    onClick={() => runVoiceCtxModeration(ctxUser.id, "kick")}
+                  >
+                    Kick user
+                  </button>
+                )}
+                {canBanMembers && (
+                  <button
+                    type="button"
+                    className="member-context-menu-item"
+                    disabled={voiceSidebarCtxBusy}
+                    onClick={() => runVoiceCtxModeration(ctxUser.id, "ban")}
+                  >
+                    Ban user
+                  </button>
+                )}
+                {canTimeoutMembers && (
+                  <button
+                    type="button"
+                    className="member-context-menu-item"
+                    disabled={voiceSidebarCtxBusy}
+                    onClick={() => runVoiceCtxModeration(ctxUser.id, "timeout", 10)}
+                  >
+                    Timeout 10m
+                  </button>
+                )}
+                {canModerateVoice && (
+                  <>
+                    <button
+                      type="button"
+                      className="member-context-menu-item"
+                      disabled={voiceSidebarCtxBusy}
+                      onClick={() => runVoiceCtxModeration(ctxUser.id, "server-mute")}
+                    >
+                      Server mute
+                    </button>
+                    <button
+                      type="button"
+                      className="member-context-menu-item"
+                      disabled={voiceSidebarCtxBusy}
+                      onClick={() => runVoiceCtxModeration(ctxUser.id, "server-unmute")}
+                    >
+                      Server unmute
+                    </button>
+                  </>
+                )}
+              </>
+            )}
+          </div>
+        );
+      })()}
+
+      {/* In-app toast notifications */}
+      <ToastNotifications
+        toasts={toasts}
+        onDismiss={dismissToast}
+        onRoomClick={(roomId) => {
+          const room =
+            rooms.find((r) => r.id === roomId) ||
+            dmRooms.find((r) => r.id === roomId);
+          if (room) handleSelectRoom(room);
+        }}
+      />
+
+      {/* Group DM user picker modal */}
+      {groupDMPicker && (() => {
+        const baseDm = groupDMPicker.baseDmRoom;
+        const existingMemberIds = new Set([
+          user?.id,
+          ...(baseDm.other_members?.map((m) => m.id) ?? [baseDm.other_user_id].filter(Boolean)),
+        ]);
+        const pickableUsers = serverUsers.filter((u) => !existingMemberIds.has(u.id));
+        return (
+          <div className="modal-overlay" onClick={() => setGroupDMPicker(null)}>
+            <div className="modal-panel group-dm-picker" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <span>Start Group DM</span>
+                <button type="button" className="modal-close" onClick={() => setGroupDMPicker(null)}>✕</button>
+              </div>
+              <div className="modal-body">
+                <p className="modal-hint">Select users to add to a new group chat.</p>
+                <div className="group-dm-user-list">
+                  {pickableUsers.length === 0 && (
+                    <div className="group-dm-empty">No other users available.</div>
+                  )}
+                  {pickableUsers.map((u) => (
+                    <label key={u.id} className="group-dm-user-row">
+                      <input
+                        type="checkbox"
+                        checked={groupDMSelectedIds.includes(u.id)}
+                        onChange={(e) => {
+                          setGroupDMSelectedIds((prev) =>
+                            e.target.checked ? [...prev, u.id] : prev.filter((id) => id !== u.id)
+                          );
+                        }}
+                      />
+                      <span className="group-dm-user-avatar">
+                        {u.avatar_url ? <img src={u.avatar_url} alt="" /> : u.username.charAt(0).toUpperCase()}
+                      </span>
+                      <span>{u.username}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <div className="modal-footer">
+                <button
+                  type="button"
+                  className="btn-primary"
+                  disabled={groupDMSelectedIds.length === 0}
+                  onClick={() => {
+                    const allMembers = [
+                      ...(baseDm.other_members?.map((m) => m.id) ?? [baseDm.other_user_id].filter(Boolean) as string[]),
+                      ...groupDMSelectedIds,
+                    ];
+                    handleCreateGroupDM(allMembers);
+                    setGroupDMPicker(null);
+                    setGroupDMSelectedIds([]);
+                  }}
+                >
+                  Create Group DM
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

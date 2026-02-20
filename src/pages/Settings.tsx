@@ -43,9 +43,23 @@ const STATUS_STYLES: Record<
 
 type SettingsProps = {
   onClose?: () => void;
+  soundEnabled?: boolean;
+  onSoundEnabledChange?: (v: boolean) => void;
+  inAppToastsEnabled?: boolean;
+  onInAppToastsEnabledChange?: (v: boolean) => void;
+  inAppToastsMentionsOnly?: boolean;
+  onInAppToastsMentionsOnlyChange?: (v: boolean) => void;
 };
 
-export default function Settings({ onClose }: SettingsProps) {
+export default function Settings({
+  onClose,
+  soundEnabled = true,
+  onSoundEnabledChange,
+  inAppToastsEnabled = true,
+  onInAppToastsEnabledChange,
+  inAppToastsMentionsOnly = false,
+  onInAppToastsMentionsOnlyChange,
+}: SettingsProps) {
   const { user, profile, updateProfile } = useAuth();
   const isModal = Boolean(onClose);
 
@@ -965,6 +979,49 @@ export default function Settings({ onClose }: SettingsProps) {
                       </button>
                     </div>
                   </div>
+
+                  {/* In-app notification settings (no OS permission needed) */}
+                  <div className="profile-section-title" style={{ marginTop: 20 }}>In-App Notifications</div>
+                  <div className="profile-grid">
+                    <div>
+                      <label className="profile-label">Sound notifications</label>
+                      <button
+                        type="button"
+                        className={`ptt-toggle ${soundEnabled ? "active" : ""}`}
+                        onClick={() => onSoundEnabledChange?.(!soundEnabled)}
+                      >
+                        {soundEnabled ? "Enabled" : "Disabled"}
+                      </button>
+                    </div>
+                    <div>
+                      <label className="profile-label">In-app popups</label>
+                      <button
+                        type="button"
+                        className={`ptt-toggle ${inAppToastsEnabled ? "active" : ""}`}
+                        onClick={() => onInAppToastsEnabledChange?.(!inAppToastsEnabled)}
+                      >
+                        {inAppToastsEnabled ? "Enabled" : "Disabled"}
+                      </button>
+                    </div>
+                    {inAppToastsEnabled && (
+                      <div>
+                        <label className="profile-label">Popup notify mode</label>
+                        <select
+                          className="profile-select"
+                          value={inAppToastsMentionsOnly ? "mentions" : "all"}
+                          onChange={(e) =>
+                            onInAppToastsMentionsOnlyChange?.(e.target.value === "mentions")
+                          }
+                        >
+                          <option value="all">All messages + DMs</option>
+                          <option value="mentions">Mentions + DMs only</option>
+                        </select>
+                      </div>
+                    )}
+                  </div>
+                  <p className="text-xs text-(--text-muted)" style={{ marginTop: 8 }}>
+                    In-app popups appear when the app is in the background. No OS permission required.
+                  </p>
                 </div>
                 )}
 

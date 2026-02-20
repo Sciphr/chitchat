@@ -2,6 +2,11 @@ use std::process::Command;
 use enigo::{Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 use serde::Serialize;
 use serde::Deserialize;
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Manager,
+};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
@@ -222,6 +227,19 @@ fn apply_remote_control_input(
     Ok(())
 }
 
+/// Update the system tray tooltip with the unread message count.
+#[tauri::command]
+fn set_tray_badge(app: tauri::AppHandle, count: u32) {
+    if let Some(tray) = app.tray_by_id("main") {
+        let tooltip = if count > 0 {
+            format!("ChitChat ({} unread)", count)
+        } else {
+            "ChitChat".to_string()
+        };
+        let _ = tray.set_tooltip(Some(&tooltip));
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -229,9 +247,55 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            let quit = MenuItem::with_id(app, "quit", "Quit ChitChat", true, None::<&str>)?;
+            let show = MenuItem::with_id(app, "show", "Open ChitChat", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show, &quit])?;
+
+            TrayIconBuilder::with_id("main")
+                .icon(app.default_window_icon().unwrap().clone())
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .tooltip("ChitChat")
+                .on_menu_event(|app: &tauri::AppHandle, event: tauri::menu::MenuEvent| {
+                    match event.id.as_ref() {
+                        "quit" => app.exit(0),
+                        "show" => {
+                            if let Some(win) = app.get_webview_window("main") {
+                                let _ = win.show();
+                                let _ = win.set_focus();
+                            }
+                        }
+                        _ => {}
+                    }
+                })
+                .on_tray_icon_event(|tray: &tauri::tray::TrayIcon, event: TrayIconEvent| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        if let Some(win) = tray.app_handle().get_webview_window("main") {
+                            let _ = win.show();
+                            let _ = win.set_focus();
+                        }
+                    }
+                })
+                .build(app)?;
+
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let _ = window.hide();
+                api.prevent_close();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             detect_running_game,
-            apply_remote_control_input
+            apply_remote_control_input,
+            set_tray_badge,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -65,6 +65,8 @@ interface SidebarProps {
   canCreateRooms: boolean;
   canManageChannels: boolean;
   canManageRoles: boolean;
+  onVoiceParticipantContextMenu?: (participantId: string, x: number, y: number) => void;
+  onStartGroupDM?: (room: Room) => void;
 }
 
 export default function Sidebar({
@@ -107,6 +109,8 @@ export default function Sidebar({
   canCreateRooms,
   canManageChannels,
   canManageRoles,
+  onVoiceParticipantContextMenu,
+  onStartGroupDM,
 }: SidebarProps) {
   type SidebarContextMenu = {
     x: number;
@@ -167,6 +171,8 @@ export default function Sidebar({
   const [showStatusMenu, setShowStatusMenu] = useState(false);
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const statusMenuRef = useRef<HTMLDivElement | null>(null);
+  const [dmContextMenu, setDmContextMenu] = useState<{ x: number; y: number; room: Room } | null>(null);
+  const dmContextMenuRef = useRef<HTMLDivElement | null>(null);
   const roomsListRef = useRef<HTMLDivElement | null>(null);
   const [activeRoomPill, setActiveRoomPill] = useState({
     top: 0,
@@ -264,6 +270,22 @@ export default function Sidebar({
       window.removeEventListener("keydown", onEscape);
     };
   }, [contextMenu]);
+
+  useEffect(() => {
+    if (!dmContextMenu) return;
+    function handleClick(event: MouseEvent) {
+      if (!dmContextMenuRef.current?.contains(event.target as Node)) setDmContextMenu(null);
+    }
+    function onEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setDmContextMenu(null);
+    }
+    window.addEventListener("mousedown", handleClick);
+    window.addEventListener("keydown", onEscape);
+    return () => {
+      window.removeEventListener("mousedown", handleClick);
+      window.removeEventListener("keydown", onEscape);
+    };
+  }, [dmContextMenu]);
 
   useEffect(() => {
     if (!showStatusMenu) return;
@@ -1695,6 +1717,11 @@ export default function Sidebar({
                                 className={`sidebar-voice-participant ${
                                   participant.isSpeaking ? "speaking" : ""
                                 }`}
+                                onContextMenu={(e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  onVoiceParticipantContextMenu?.(participant.id, e.clientX, e.clientY);
+                                }}
                               >
                                 <span className="sidebar-voice-dot" />
                                 <span className="sidebar-voice-name">
@@ -1734,7 +1761,11 @@ export default function Sidebar({
             <div className="sidebar-section-title heading-font">Direct Messages</div>
             <AnimatePresence initial={false}>
               {dmRooms.map((dm) => {
-                const displayName = dm.other_username || "Unknown User";
+                const isGroup = (dm.other_members?.length ?? 0) > 1;
+                const displayName = isGroup
+                  ? (dm.other_members ?? []).map((m) => m.username).join(", ")
+                  : (dm.other_username || "Unknown User");
+                const avatarUrl = isGroup ? null : dm.other_avatar_url;
                 return (
                   <motion.div
                     key={dm.id}
@@ -1757,13 +1788,19 @@ export default function Sidebar({
                         onSelectRoom(dm);
                       }
                     }}
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      setDmContextMenu({ x: event.clientX, y: event.clientY, room: dm });
+                    }}
                     title={displayName}
                   >
                     <div className="sidebar-dm-open">
                       <span className="sidebar-channel-main">
-                        <span className="sidebar-dm-avatar">
-                          {dm.other_avatar_url ? (
-                            <img src={dm.other_avatar_url} alt="" />
+                        <span className={`sidebar-dm-avatar ${isGroup ? "sidebar-dm-avatar-group" : ""}`}>
+                          {isGroup ? (
+                            <span className="sidebar-dm-group-icon">👥</span>
+                          ) : avatarUrl ? (
+                            <img src={avatarUrl} alt="" />
                           ) : (
                             displayName.charAt(0).toUpperCase()
                           )}
@@ -1777,8 +1814,8 @@ export default function Sidebar({
                     <button
                       type="button"
                       className="sidebar-dm-hide"
-                      title={`Hide DM with ${displayName}`}
-                      aria-label={`Hide DM with ${displayName}`}
+                      title={`Hide DM`}
+                      aria-label={`Hide DM`}
                       onClick={(event) => {
                         event.stopPropagation();
                         onHideDM(dm.id);
@@ -2070,6 +2107,32 @@ export default function Sidebar({
         </div>
       </div>
       </aside>
+
+      {/* DM right-click context menu */}
+      {dmContextMenu && (
+        <div
+          ref={dmContextMenuRef}
+          className="sidebar-context-menu"
+          style={{ top: dmContextMenu.y, left: dmContextMenu.x, position: "fixed", zIndex: 9999 }}
+        >
+          {onStartGroupDM && (
+            <button
+              type="button"
+              className="sidebar-context-menu-item"
+              onClick={() => { onStartGroupDM(dmContextMenu.room); setDmContextMenu(null); }}
+            >
+              Start Group DM
+            </button>
+          )}
+          <button
+            type="button"
+            className="sidebar-context-menu-item"
+            onClick={() => { onHideDM(dmContextMenu.room.id); setDmContextMenu(null); }}
+          >
+            Hide DM
+          </button>
+        </div>
+      )}
     </>
   );
 }

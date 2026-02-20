@@ -30,6 +30,13 @@ export interface Room {
   other_username?: string;
   other_avatar_url?: string | null;
   other_status?: string;
+  // Group DM: array of all other members (populated for group DMs)
+  other_members?: Array<{
+    id: string;
+    username: string;
+    avatar_url: string | null;
+    status: string;
+  }>;
 }
 
 export interface RoomCategory {
@@ -70,6 +77,10 @@ export interface VoiceControls {
     maxScreenShareResolution: string;
     maxScreenShareFps: number;
   };
+  /** Per-participant local volume (0–1). Keyed by participant identity. */
+  participantVolumes: Record<string, number>;
+  /** Set local playback volume for a participant (0–1). */
+  setParticipantVolume: (participantId: string, volume: number) => void;
 }
 
 export interface Message {
