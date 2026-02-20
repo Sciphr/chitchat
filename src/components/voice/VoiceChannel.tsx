@@ -540,6 +540,7 @@ function VoiceRoomContent({
   // instead of waiting for useParticipants() to re-render.
   useEffect(() => {
     if (!onParticipantsChange) return;
+    const _onParticipantsChange = onParticipantsChange;
     function onActiveSpeakersChanged(speakers: { identity: string }[]) {
       const speakingIds = new Set(speakers.map((s) => s.identity));
       const dedupedById = new Map<string, VoiceParticipant>();
@@ -552,7 +553,7 @@ function VoiceRoomContent({
           isSpeaking: speakingIds.has(id) || (participant.audioLevel ?? 0) > 0.02,
         });
       }
-      onParticipantsChange(roomId, Array.from(dedupedById.values()));
+      _onParticipantsChange(roomId, Array.from(dedupedById.values()));
     }
     room.on(RoomEvent.ActiveSpeakersChanged, onActiveSpeakersChanged);
     return () => {
