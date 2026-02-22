@@ -4150,6 +4150,17 @@ body {
   background: #000;
 }
 
+/* Override LiveKit default "landscape => cover" behavior in our voice tiles.
+   We always want full camera frame visible inside the thumbnail. */
+.voice-tile .voice-tile-video.lk-participant-media-video,
+.voice-tile .voice-tile-video.lk-participant-media-video[data-lk-orientation="landscape"],
+.voice-tile .voice-tile-video.lk-participant-media-video[data-lk-orientation="portrait"],
+.voice-tile .voice-tile-video.lk-participant-media-video[data-lk-source="screen_share"] {
+  object-fit: contain;
+  object-position: center;
+  background: #000;
+}
+
 .voice-tile-speaking-ring {
   position: absolute;
   inset: 0;
