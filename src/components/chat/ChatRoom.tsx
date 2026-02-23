@@ -981,7 +981,9 @@ export default function ChatRoom({
               <AtSign size={16} />
             </span>
             <h2 className="room-header-title heading-font">
-              {room.other_username || "Direct Message"}
+              {(room.other_members?.length ?? 0) > 1
+                ? room.other_members!.map((m) => m.username).join(", ")
+                : room.other_username || "Direct Message"}
             </h2>
           </>
         ) : (

@@ -5097,6 +5097,18 @@ body {
   font-size: 14px;
 }
 
+.sidebar-dm-call-icon {
+  flex-shrink: 0;
+  margin-left: 4px;
+  color: var(--success, #4caf50);
+  animation: dm-call-pulse 1.5s ease-in-out infinite alternate;
+}
+
+@keyframes dm-call-pulse {
+  from { opacity: 1; }
+  to { opacity: 0.5; }
+}
+
 /* ========== Toast Notifications ========== */
 @keyframes toastSlideIn {
   from {

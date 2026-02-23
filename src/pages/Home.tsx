@@ -85,6 +85,22 @@ export default function Home() {
   const [pendingAutoJoinVoiceRoomId, setPendingAutoJoinVoiceRoomId] = useState<
     string | null
   >(null);
+  // Tracks a DM room that has an active voice session (DM voice calls use the DM room ID for LiveKit).
+  const [dmVoiceRoomId, setDmVoiceRoomId] = useState<string | null>(null);
+  // Ref to avoid stale closure when checking dmVoiceRoomId inside callbacks.
+  const dmVoiceRoomIdRef = useRef<string | null>(null);
+  // Caller is waiting for the callee to answer a DM call ring.
+  const [dmCallRinging, setDmCallRinging] = useState<{
+    dmRoomId: string;
+    targetUsername: string;
+  } | null>(null);
+  // Callee is seeing an incoming DM call notification.
+  const [dmCallIncoming, setDmCallIncoming] = useState<{
+    dmRoomId: string;
+    callerUserId: string;
+    callerUsername: string;
+    dmRoom: Room;
+  } | null>(null);
   const [memberListOpen, setMemberListOpen] = useState(() => {
     const saved = localStorage.getItem("chitchat-member-list-open");
     return saved !== null ? saved === "true" : true;
@@ -121,6 +137,11 @@ export default function Home() {
   } | null>(null);
   const voiceSidebarCtxMenuRef = useRef<HTMLDivElement | null>(null);
   const [voiceSidebarCtxBusy, setVoiceSidebarCtxBusy] = useState(false);
+  // Ref tracks the connected voice room without stale closure issues in socket listeners.
+  const connectedVoiceRoomIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    dmVoiceRoomIdRef.current = dmVoiceRoomId;
+  }, [dmVoiceRoomId]);
   const [groupDMPicker, setGroupDMPicker] = useState<{ baseDmRoom: Room } | null>(null);
   const [groupDMSelectedIds, setGroupDMSelectedIds] = useState<string[]>([]);
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -488,19 +509,59 @@ export default function Home() {
   function handleStartCall(targetUser: ServerUser) {
     if (!targetUser || targetUser.id === user?.id) return;
     socket.emit(
-      "call:start",
+      "dm:call:ring",
       { targetUserId: targetUser.id },
-      (ack?: { ok: boolean; room?: Room; error?: string }) => {
-        if (!ack?.ok || !ack.room) return;
-        setActiveCall({
-          room: ack.room as Room,
-          ownerUserId: user?.id || "",
-          participantIds: [user?.id || "", targetUser.id].filter(Boolean),
+      (ack: { ok: boolean; error?: string; dmRoomId?: string; dmRoom?: Room }) => {
+        if (!ack?.ok || !ack.dmRoomId || !ack.dmRoom) {
+          if (ack?.error) addToast({ message: ack.error, type: "error" });
+          return;
+        }
+        const dmRoom = ack.dmRoom;
+        setHiddenDmByRoomId((prev) => {
+          if (!prev[dmRoom.id]) return prev;
+          const next = { ...prev };
+          delete next[dmRoom.id];
+          return next;
         });
-        // Don't switch activeRoom — show voice call as inline panel
-        setPendingAutoJoinVoiceRoomId((ack.room as Room).id);
+        setDmRooms((prev) => {
+          if (prev.some((r) => r.id === dmRoom.id)) return prev;
+          return [dmRoom, ...prev];
+        });
+        setActiveRoom(dmRoom);
+        setDmCallRinging({ dmRoomId: ack.dmRoomId, targetUsername: targetUser.username });
       }
     );
+  }
+
+  function handleAcceptDmCall() {
+    if (!dmCallIncoming) return;
+    const { dmRoomId, dmRoom } = dmCallIncoming;
+    socket.emit("dm:call:answer", { dmRoomId }, (ack: { ok: boolean }) => {
+      if (!ack?.ok) return;
+      setDmCallIncoming(null);
+      setDmVoiceRoomId(dmRoomId);
+      setActiveRoom(dmRoom);
+      setPendingAutoJoinVoiceRoomId(dmRoomId);
+    });
+  }
+
+  function handleDeclineDmCall() {
+    if (!dmCallIncoming) return;
+    socket.emit("dm:call:decline", { dmRoomId: dmCallIncoming.dmRoomId });
+    setDmCallIncoming(null);
+  }
+
+  function handleCancelDmRing() {
+    if (!dmCallRinging) return;
+    socket.emit("dm:call:cancel", { dmRoomId: dmCallRinging.dmRoomId });
+    setDmCallRinging(null);
+  }
+
+  function handleEndDmCall() {
+    const roomId = dmVoiceRoomIdRef.current;
+    if (!roomId) return;
+    socket.emit("dm:call:end", { dmRoomId: roomId });
+    // Local state cleared when dm:call:ended event is received
   }
 
   function handleAddToCall(targetUser: ServerUser) {
@@ -1004,17 +1065,141 @@ export default function Home() {
     };
   }, [isConnected, socket, user?.id]);
 
+  // DM call events
+  useEffect(() => {
+    if (!isConnected) return;
+
+    function onDmCallIncoming(payload: {
+      dmRoomId: string;
+      callerUserId: string;
+      callerUsername: string;
+      dmRoom: Room;
+    }) {
+      if (!payload?.dmRoomId) return;
+      setDmCallIncoming({
+        dmRoomId: payload.dmRoomId,
+        callerUserId: payload.callerUserId,
+        callerUsername: payload.callerUsername,
+        dmRoom: payload.dmRoom,
+      });
+      // Ensure the DM room appears in the list
+      setHiddenDmByRoomId((prev) => {
+        if (!prev[payload.dmRoomId]) return prev;
+        const next = { ...prev };
+        delete next[payload.dmRoomId];
+        return next;
+      });
+      setDmRooms((prev) => {
+        if (prev.some((r) => r.id === payload.dmRoomId)) return prev;
+        return [payload.dmRoom, ...prev];
+      });
+    }
+
+    function onDmCallAccepted(payload: { dmRoomId: string }) {
+      if (!payload?.dmRoomId) return;
+      // Caller: the callee accepted — start the voice session
+      setDmCallRinging((prev) => (prev?.dmRoomId === payload.dmRoomId ? null : prev));
+      setDmVoiceRoomId(payload.dmRoomId);
+      setPendingAutoJoinVoiceRoomId(payload.dmRoomId);
+    }
+
+    function onDmCallDeclined(payload: { dmRoomId: string }) {
+      if (!payload?.dmRoomId) return;
+      setDmCallRinging((prev) => (prev?.dmRoomId === payload.dmRoomId ? null : prev));
+      addToast({ message: "Call declined.", type: "info" });
+    }
+
+    function onDmCallCancelled(payload: { dmRoomId: string }) {
+      if (!payload?.dmRoomId) return;
+      setDmCallIncoming((prev) => (prev?.dmRoomId === payload.dmRoomId ? null : prev));
+    }
+
+    function onDmCallUnanswered(payload: { dmRoomId: string }) {
+      if (!payload?.dmRoomId) return;
+      setDmCallRinging((prev) => (prev?.dmRoomId === payload.dmRoomId ? null : prev));
+      addToast({ message: "No answer.", type: "info" });
+    }
+
+    function onDmCallEnded(payload: { dmRoomId: string }) {
+      if (!payload?.dmRoomId) return;
+      // Clear all DM call state — VoiceChannel will unmount and disconnect LiveKit
+      setDmVoiceRoomId((prev) => (prev === payload.dmRoomId ? null : prev));
+      setDmCallRinging((prev) => (prev?.dmRoomId === payload.dmRoomId ? null : prev));
+      setDmCallIncoming((prev) => (prev?.dmRoomId === payload.dmRoomId ? null : prev));
+      setPendingAutoJoinVoiceRoomId((prev) => (prev === payload.dmRoomId ? null : prev));
+    }
+
+    socket.on("dm:call:incoming", onDmCallIncoming);
+    socket.on("dm:call:accepted", onDmCallAccepted);
+    socket.on("dm:call:declined", onDmCallDeclined);
+    socket.on("dm:call:cancelled", onDmCallCancelled);
+    socket.on("dm:call:unanswered", onDmCallUnanswered);
+    socket.on("dm:call:ended", onDmCallEnded);
+    return () => {
+      socket.off("dm:call:incoming", onDmCallIncoming);
+      socket.off("dm:call:accepted", onDmCallAccepted);
+      socket.off("dm:call:declined", onDmCallDeclined);
+      socket.off("dm:call:cancelled", onDmCallCancelled);
+      socket.off("dm:call:unanswered", onDmCallUnanswered);
+      socket.off("dm:call:ended", onDmCallEnded);
+    };
+  }, [isConnected, socket, addToast]);
+
+  // Listen for server-broadcast voice channel occupancy (shows who is in voice even when you're not).
+  useEffect(() => {
+    if (!isConnected) return;
+    type VoiceStateUser = { id: string; username: string; avatar_url?: string; status?: string };
+    function onVoiceState({ channels }: { channels: Record<string, VoiceStateUser[]> }) {
+      setVoiceParticipants((prev) => {
+        const myRoomId = connectedVoiceRoomIdRef.current;
+        const next: typeof prev = {};
+        // Preserve LiveKit data for the channel we're personally connected to.
+        if (myRoomId && prev[myRoomId]) {
+          next[myRoomId] = prev[myRoomId];
+        }
+        // Apply server-reported occupancy for all other channels.
+        for (const [roomId, users] of Object.entries(channels)) {
+          if (roomId === myRoomId) continue;
+          if (users.length > 0) {
+            next[roomId] = users.map((u) => ({
+              id: u.id,
+              name: u.username,
+              isSpeaking: false,
+            }));
+          }
+        }
+        return next;
+      });
+    }
+    socket.on("voice:state", onVoiceState);
+    return () => {
+      socket.off("voice:state", onVoiceState);
+    };
+  }, [isConnected, socket]);
+
   const handleVoiceControlsChange = useCallback(
     (roomId: string, controls: VoiceControls | null) => {
       setVoiceControls(controls);
       if (controls) {
         setConnectedVoiceRoomId((prev) => (prev === roomId ? prev : roomId));
         setPendingAutoJoinVoiceRoomId((prev) => (prev === roomId ? null : prev));
+        connectedVoiceRoomIdRef.current = roomId;
+        // voice:join is only for permanent voice channels (server ignores DM rooms)
+        socket.emit("voice:join", { roomId });
       } else {
         setConnectedVoiceRoomId((prev) => (prev === roomId ? null : prev));
+        if (connectedVoiceRoomIdRef.current === roomId) {
+          connectedVoiceRoomIdRef.current = null;
+        }
+        // If this was an active DM call, end it for both parties
+        if (dmVoiceRoomIdRef.current === roomId) {
+          setDmVoiceRoomId(null);
+          socket.emit("dm:call:end", { dmRoomId: roomId });
+        }
+        socket.emit("voice:leave", { roomId });
       }
     },
-    []
+    [socket]
   );
 
   const markRoomRead = useCallback((roomId: string) => {
@@ -1305,13 +1490,18 @@ export default function Home() {
     if (activeVoiceRoom?.id === connectedVoiceRoomId) return activeVoiceRoom;
     return rooms.find((room) => room.type === "voice" && room.id === connectedVoiceRoomId) ?? null;
   }, [connectedVoiceRoomId, activeVoiceRoom, rooms]);
+  // DM room with an active voice session.
+  const connectedDmVoiceRoom = useMemo(() => {
+    if (!dmVoiceRoomId) return null;
+    return dmRooms.find((r) => r.id === dmVoiceRoomId) ?? null;
+  }, [dmVoiceRoomId, dmRooms]);
   // Also use the active DM call room even if it's not the activeRoom
   const callRoom = useMemo(() => {
     if (!activeCall) return null;
     if ((activeCall.participantIds || []).includes(user?.id || "")) return activeCall.room;
     return null;
   }, [activeCall, user?.id]);
-  const voiceSessionRoom = connectedVoiceRoom || activeVoiceRoom || callRoom;
+  const voiceSessionRoom = connectedVoiceRoom || activeVoiceRoom || connectedDmVoiceRoom || callRoom;
   const mentionableUsernames = useMemo(() => {
     const set = new Set<string>();
     for (const serverUser of serverUsers) {
@@ -1404,6 +1594,7 @@ export default function Home() {
           canManageRoles={canManageRoles}
           onVoiceParticipantContextMenu={handleVoiceParticipantContextMenu}
           onStartGroupDM={handleStartGroupDMPicker}
+          activeDmCallRoomId={dmVoiceRoomId}
         />
 
         {/* Main content area */}
@@ -1440,7 +1631,24 @@ export default function Home() {
                 </button>
               </div>
             )}
-            {/* Incoming call notification */}
+            {/* Incoming DM call notification */}
+            {dmCallIncoming && (
+              <div className="incoming-call-banner">
+                <span className="incoming-call-icon">📞</span>
+                <span className="incoming-call-text">Incoming call from <strong>{dmCallIncoming.callerUsername}</strong></span>
+                <button type="button" className="incoming-call-accept" onClick={handleAcceptDmCall}>Accept</button>
+                <button type="button" className="incoming-call-decline" onClick={handleDeclineDmCall}>Decline</button>
+              </div>
+            )}
+            {/* DM call ringing (waiting for callee to answer) */}
+            {dmCallRinging && (
+              <div className="incoming-call-banner">
+                <span className="incoming-call-icon">📞</span>
+                <span className="incoming-call-text">Calling <strong>{dmCallRinging.targetUsername}</strong>...</span>
+                <button type="button" className="incoming-call-decline" onClick={handleCancelDmRing}>Cancel</button>
+              </div>
+            )}
+            {/* Incoming call notification (group/server calls) */}
             {incomingCallNotification && (() => {
               const callerUser = serverUsers.find((u) => u.id === incomingCallNotification.ownerUserId);
               const callerName = callerUser?.username || "Someone";
@@ -1453,11 +1661,17 @@ export default function Home() {
                 </div>
               );
             })()}
-            {/* Voice channel — fullscreen for regular voice rooms, mini panel for DM calls */}
+            {/* Voice channel — kept mounted to maintain audio connection.
+                Shown fullscreen when the voice channel is active, compact when
+                viewing the DM that has an active voice call, hidden otherwise. */}
             {voiceSessionRoom && (
               <div
                 className={`flex flex-col min-w-0 overflow-hidden ${
-                  activeRoom?.type === "voice" ? "flex-1 min-h-0" : "voice-call-mini"
+                  activeRoom?.id === voiceSessionRoom.id && activeRoom?.type === "voice"
+                    ? "flex-1 min-h-0"
+                    : activeRoom?.id === voiceSessionRoom.id && activeRoom?.type === "dm"
+                    ? "voice-call-mini"
+                    : "hidden"
                 }`}
               >
                 <VoiceChannel

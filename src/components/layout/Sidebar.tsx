@@ -9,6 +9,7 @@ import {
   Video,
   VideoOff,
   MonitorUp,
+  Phone,
   PhoneOff,
   Wind,
   MessageSquare,
@@ -67,6 +68,7 @@ interface SidebarProps {
   canManageRoles: boolean;
   onVoiceParticipantContextMenu?: (participantId: string, x: number, y: number) => void;
   onStartGroupDM?: (room: Room) => void;
+  activeDmCallRoomId?: string | null;
 }
 
 export default function Sidebar({
@@ -111,6 +113,7 @@ export default function Sidebar({
   canManageRoles,
   onVoiceParticipantContextMenu,
   onStartGroupDM,
+  activeDmCallRoomId,
 }: SidebarProps) {
   type SidebarContextMenu = {
     x: number;
@@ -1808,6 +1811,9 @@ export default function Sidebar({
                         <span className="sidebar-channel-main-text">
                           {displayName}
                         </span>
+                        {activeDmCallRoomId === dm.id && (
+                          <Phone size={12} className="sidebar-dm-call-icon" aria-label="Call active" />
+                        )}
                       </span>
                       {renderRoomBadges(dm.id)}
                     </div>
