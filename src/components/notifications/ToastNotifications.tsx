@@ -2,11 +2,14 @@ import { useEffect, useRef } from "react";
 
 export interface Toast {
   id: string;
-  roomId: string;
-  title: string;
-  body: string;
+  roomId?: string;
+  title?: string;
+  body?: string;
   avatarUrl?: string;
-  isDm: boolean;
+  isDm?: boolean;
+  /** Simple alert message (used instead of title/body for non-notification toasts) */
+  message?: string;
+  type?: "error" | "info" | "success";
 }
 
 interface Props {
@@ -35,26 +38,36 @@ function ToastItem({
     };
   }, [toast.id, onDismiss]);
 
+  const isAlert = !toast.roomId && toast.message !== undefined;
+
   return (
     <div
-      className="toast"
+      className={`toast${toast.type ? ` toast-${toast.type}` : ""}`}
       onClick={() => {
-        onRoomClick(toast.roomId);
+        if (toast.roomId) onRoomClick(toast.roomId);
         onDismiss(toast.id);
       }}
     >
-      <div className="toast-avatar">
-        {toast.avatarUrl ? (
-          <img src={toast.avatarUrl} alt="" className="toast-avatar-img" />
-        ) : (
-          <span className="toast-avatar-placeholder">
-            {toast.isDm ? toast.title.charAt(0).toUpperCase() : "#"}
-          </span>
-        )}
-      </div>
+      {!isAlert && (
+        <div className="toast-avatar">
+          {toast.avatarUrl ? (
+            <img src={toast.avatarUrl} alt="" className="toast-avatar-img" />
+          ) : (
+            <span className="toast-avatar-placeholder">
+              {toast.isDm ? (toast.title ?? "").charAt(0).toUpperCase() : "#"}
+            </span>
+          )}
+        </div>
+      )}
       <div className="toast-content">
-        <div className="toast-title">{toast.title}</div>
-        <div className="toast-body">{toast.body}</div>
+        {isAlert ? (
+          <div className="toast-body">{toast.message}</div>
+        ) : (
+          <>
+            <div className="toast-title">{toast.title}</div>
+            <div className="toast-body">{toast.body}</div>
+          </>
+        )}
       </div>
       <button
         type="button"

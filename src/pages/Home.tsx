@@ -557,13 +557,6 @@ export default function Home() {
     setDmCallRinging(null);
   }
 
-  function handleEndDmCall() {
-    const roomId = dmVoiceRoomIdRef.current;
-    if (!roomId) return;
-    socket.emit("dm:call:end", { dmRoomId: roomId });
-    // Local state cleared when dm:call:ended event is received
-  }
-
   function handleAddToCall(targetUser: ServerUser) {
     if (!activeCall) return;
     socket.emit("call:addParticipant", { roomId: activeCall.room.id, userId: targetUser.id });
