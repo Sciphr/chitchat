@@ -1674,6 +1674,7 @@ export default function Home() {
                   autoJoin={pendingAutoJoinVoiceRoomId === voiceSessionRoom.id}
                   onVoiceControlsChange={handleVoiceControlsChange}
                   currentUserId={user?.id ?? null}
+                  currentParticipants={voiceParticipants[voiceSessionRoom.id] ?? []}
                   remoteControlSession={
                     remoteControlSession?.roomId === voiceSessionRoom.id
                       ? remoteControlSession

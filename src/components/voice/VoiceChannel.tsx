@@ -35,6 +35,7 @@ interface VoiceChannelProps {
   onParticipantsChange?: (roomId: string, participants: VoiceParticipant[]) => void;
   onVoiceControlsChange?: (roomId: string, controls: VoiceControls | null) => void;
   currentUserId?: string | null;
+  currentParticipants?: VoiceParticipant[];
   remoteControlSession?: {
     sessionId: string;
     roomId: string;
@@ -1162,6 +1163,7 @@ export default function VoiceChannel({
   onParticipantsChange,
   onVoiceControlsChange,
   currentUserId,
+  currentParticipants,
   remoteControlSession,
   remoteControlPendingHostId,
   onRequestScreenControl,
@@ -1238,9 +1240,25 @@ export default function VoiceChannel({
           <div className="voice-join">
             <div className="voice-join-card">
               <div className="voice-join-title">Join channel</div>
-              <p className="voice-join-subtitle">
-                Connect to voice chat.
-              </p>
+              {currentParticipants && currentParticipants.length > 0 ? (
+                <div className="voice-join-participants">
+                  <div className="voice-join-participants-label">
+                    {currentParticipants.length === 1
+                      ? "1 person in this channel"
+                      : `${currentParticipants.length} people in this channel`}
+                  </div>
+                  <div className="voice-join-participants-list">
+                    {currentParticipants.map((p) => (
+                      <div key={p.id} className={`voice-join-participant${p.isSpeaking ? " speaking" : ""}`}>
+                        <span className="voice-join-dot" />
+                        <span className="voice-join-participant-name">{p.name}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <p className="voice-join-subtitle">No one is here yet.</p>
+              )}
               {error && <div className="voice-error">{error}</div>}
               <button
                 onClick={handleJoin}
