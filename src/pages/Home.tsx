@@ -1165,6 +1165,10 @@ export default function Home() {
       });
     }
     socket.on("voice:state", onVoiceState);
+    // Request current state immediately after registering the listener.
+    // The server sends voice:state on connect but React registers this listener
+    // after isConnected flips true, so that initial emit is always missed.
+    socket.emit("voice:state:request");
     return () => {
       socket.off("voice:state", onVoiceState);
     };
