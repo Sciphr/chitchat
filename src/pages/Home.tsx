@@ -599,6 +599,12 @@ export default function Home() {
         const nextParticipants = participants.filter((participant) =>
           Boolean(participant.id?.trim())
         );
+        // Don't wipe server-reported participants when VoiceChannel unmounts without
+        // having connected to LiveKit (e.g. user viewed the channel but didn't join).
+        // Only allow clearing when we were actually connected to this room via LiveKit.
+        if (nextParticipants.length === 0 && connectedVoiceRoomIdRef.current !== roomId) {
+          return prev;
+        }
         const prevParticipants = prev[roomId] ?? [];
         const isSameLength = prevParticipants.length === nextParticipants.length;
         const isSameSnapshot =
