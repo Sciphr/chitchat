@@ -1186,9 +1186,17 @@ export default function Home() {
       if (controls) {
         setConnectedVoiceRoomId((prev) => (prev === roomId ? prev : roomId));
         setPendingAutoJoinVoiceRoomId((prev) => (prev === roomId ? null : prev));
-        connectedVoiceRoomIdRef.current = roomId;
-        // voice:join is only for permanent voice channels (server ignores DM rooms)
-        socket.emit("voice:join", { roomId });
+        // Only mark as connected and notify the server once LiveKit is actually
+        // connected. VoiceRoomContent fires this callback on mount with
+        // isConnected:false, before LiveKit finishes handshaking. Setting the
+        // ref early would defeat the guard in handleParticipantsChange and cause
+        // server-reported participants (from voice:state) to be wiped while the
+        // room is still connecting.
+        if (controls.isConnected) {
+          connectedVoiceRoomIdRef.current = roomId;
+          // voice:join is only for permanent voice channels (server ignores DM rooms)
+          socket.emit("voice:join", { roomId });
+        }
       } else {
         setConnectedVoiceRoomId((prev) => (prev === roomId ? null : prev));
         if (connectedVoiceRoomIdRef.current === roomId) {
