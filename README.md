@@ -1,4 +1,4 @@
-# ChitChat
+# ChitChat - Sciphr
 
 Windows desktop client for ChitChat.
 
