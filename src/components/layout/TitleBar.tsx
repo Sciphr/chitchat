@@ -26,7 +26,9 @@ export default function TitleBar() {
       const { check } = await import("@tauri-apps/plugin-updater");
       const update = await check();
       if (!update) {
-        setUpdateStatus("You're up to date.");
+        const { getVersion } = await import("@tauri-apps/api/app");
+        const currentVersion = await getVersion();
+        setUpdateStatus(`You're up to date (v${currentVersion}).`);
         setUpdateStatusKind("success");
         return;
       }
