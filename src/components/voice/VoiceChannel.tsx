@@ -708,6 +708,7 @@ function VoiceRoomContent({
             frameRate: clampedFps,
           },
           contentHint: "motion",
+          audio: true,
         },
         {
           videoEncoding: {
