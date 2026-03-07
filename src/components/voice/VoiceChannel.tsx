@@ -690,13 +690,32 @@ function VoiceRoomContent({
       const clampedRes = clampResolution(resolution, mediaLimits.maxScreenShareResolution);
       const clampedFps = clampFps(fps, mediaLimits.maxScreenShareFps);
       const dims = resolveResolution(clampedRes);
-      await room.localParticipant.setScreenShareEnabled(true, {
-        resolution: {
-          width: dims.width,
-          height: dims.height,
-          frameRate: clampedFps,
+      const screenShareBitrateByRes: Record<string, number> = {
+        "360p": 1_500_000,
+        "480p": 2_500_000,
+        "720p": 4_000_000,
+        "1080p": 7_000_000,
+        "1440p": 12_000_000,
+        "4k": 20_000_000,
+      };
+      const maxBitrate = screenShareBitrateByRes[clampedRes] ?? 4_000_000;
+      await room.localParticipant.setScreenShareEnabled(
+        true,
+        {
+          resolution: {
+            width: dims.width,
+            height: dims.height,
+            frameRate: clampedFps,
+          },
+          contentHint: "motion",
         },
-      });
+        {
+          videoEncoding: {
+            maxBitrate,
+            maxFramerate: clampedFps,
+          },
+        },
+      );
       setIsScreenSharing(true);
     } catch {
       // User cancelled the screen picker dialog
