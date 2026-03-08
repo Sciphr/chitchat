@@ -369,9 +369,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   async function signInWithPassword(email: string, password: string) {
     try {
+      const versionHeaders: Record<string, string> = {};
+      if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
+        try {
+          const { getVersion } = await import("@tauri-apps/api/app");
+          versionHeaders["X-Client-Version"] = await getVersion();
+        } catch {
+          // Not fatal — version header is optional
+        }
+      }
       const res = await apiFetch("/api/auth/login", {
         method: "POST",
         body: JSON.stringify({ email, password }),
+        headers: versionHeaders,
       });
 
       const data = await res.json();
@@ -416,9 +426,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   async function signInWithTwoFactor(challengeToken: string, code: string) {
     try {
+      const versionHeaders: Record<string, string> = {};
+      if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
+        try {
+          const { getVersion } = await import("@tauri-apps/api/app");
+          versionHeaders["X-Client-Version"] = await getVersion();
+        } catch {
+          // Not fatal — version header is optional
+        }
+      }
       const res = await apiFetch("/api/auth/login/2fa", {
         method: "POST",
         body: JSON.stringify({ challengeToken, code }),
+        headers: versionHeaders,
       });
       const data = await res.json();
       if (!res.ok) {

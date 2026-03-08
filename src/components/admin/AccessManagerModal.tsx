@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Socket } from "socket.io-client";
 import type { Room, ServerUser } from "../../types";
+import { apiFetch } from "../../lib/api";
 
 type Role = {
   id: string;
@@ -136,6 +137,7 @@ export default function AccessManagerModal({
     Record<string, RoomPermission>
   >({});
   const membersListRef = useRef<HTMLDivElement | null>(null);
+  const [userClientVersions, setUserClientVersions] = useState<Record<string, string | null>>({});
 
   const sortedRoles = useMemo(() => sortRoles(roles), [roles]);
   const assignableRoles = useMemo(
@@ -231,6 +233,19 @@ export default function AccessManagerModal({
     if (activeTab !== "members") return;
     if (!membersListRef.current) return;
     membersListRef.current.scrollTop = 0;
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (activeTab !== "members") return;
+    apiFetch("/api/admin/users")
+      .then((res) => res.ok ? res.json() : null)
+      .then((data: Array<{ id: string; last_client_version: string | null }> | null) => {
+        if (!data) return;
+        const map: Record<string, string | null> = {};
+        for (const u of data) map[u.id] = u.last_client_version ?? null;
+        setUserClientVersions(map);
+      })
+      .catch(() => {});
   }, [activeTab]);
 
   useEffect(() => {
@@ -601,6 +616,9 @@ export default function AccessManagerModal({
                       <span>{entry.username}</span>
                       <span className="text-xs text-[var(--text-muted)]">
                         {(userRoles[entry.id] || []).length} role(s)
+                        {userClientVersions[entry.id]
+                          ? ` · v${userClientVersions[entry.id]}`
+                          : " · no version"}
                       </span>
                     </button>
                   ))}

@@ -17,7 +17,11 @@ import {
   ChevronDown,
   ChevronRight,
 } from "lucide-react";
-import { getResolutionsUpTo, getFpsUpTo } from "../../lib/livekit";
+import {
+  getResolutionsUpTo,
+  getFpsUpTo,
+  getRecommendedScreenShareQuality,
+} from "../../lib/livekit";
 import { getServerUrl } from "../../lib/api";
 
 interface SidebarProps {
@@ -643,6 +647,12 @@ export default function Sidebar({
 
   // Fetch fresh media limits from server and position the popover
   const openSharePicker = useCallback(async () => {
+    let nextLimits =
+      voiceControls?.mediaLimits ?? {
+        maxScreenShareResolution: "1080p",
+        maxScreenShareFps: 30,
+      };
+
     // Calculate fixed position from the anchor ref
     if (sharePickerRef.current) {
       const rect = sharePickerRef.current.getBoundingClientRect();
@@ -658,18 +668,26 @@ export default function Sidebar({
       if (res.ok) {
         const data = await res.json();
         if (data.mediaLimits) {
-          setPickerLimits({
+          nextLimits = {
             maxScreenShareResolution: data.mediaLimits.maxScreenShareResolution,
             maxScreenShareFps: data.mediaLimits.maxScreenShareFps,
-          });
+          };
+          setPickerLimits(nextLimits);
         }
       }
     } catch {
       // Fall back to voice controls limits
     }
 
+    const recommended = getRecommendedScreenShareQuality(
+      nextLimits.maxScreenShareResolution,
+      nextLimits.maxScreenShareFps
+    );
+    setShareRes(recommended.resolution);
+    setShareFps(recommended.fps);
+
     setShowSharePicker(true);
-  }, []);
+  }, [voiceControls?.mediaLimits]);
 
   // Use freshly-fetched limits when available, otherwise fall back to token-time limits
   const activeLimits = pickerLimits || voiceControls?.mediaLimits;

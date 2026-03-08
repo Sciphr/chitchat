@@ -109,6 +109,23 @@ export function clampFps(userPref: number, serverMax: number): number {
   return userPref <= serverMax ? userPref : serverMax;
 }
 
+/** Recommend a conservative default for motion-heavy screen sharing. */
+export function getRecommendedScreenShareQuality(
+  serverMaxResolution: string,
+  serverMaxFps: number
+): { resolution: string; fps: number } {
+  const allowedFps = getFpsUpTo(serverMaxFps);
+  const maxAllowedFps = allowedFps.length > 0 ? allowedFps[allowedFps.length - 1] : 15;
+  const prefersHighFps = maxAllowedFps >= 60;
+  const preferredResolution = prefersHighFps ? "720p" : "1080p";
+  const preferredFps = prefersHighFps ? 60 : maxAllowedFps >= 30 ? 30 : maxAllowedFps;
+
+  return {
+    resolution: clampResolution(preferredResolution, serverMaxResolution),
+    fps: clampFps(preferredFps, serverMaxFps),
+  };
+}
+
 /** Map a resolution preset string to width/height */
 export function resolveResolution(preset: string): { width: number; height: number } {
   switch (preset) {

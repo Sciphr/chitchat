@@ -23,9 +23,16 @@ import {
 } from "livekit-client";
 import { BackgroundProcessor, supportsBackgroundProcessors } from "@livekit/track-processors";
 import { LiveKitRnnoiseProcessor, supportsRnnoiseProcessing } from "../../lib/rnnoiseProcessor";
-import { Volume2 } from "lucide-react";
+import { Volume2, VolumeX } from "lucide-react";
 import { useAuth } from "../../hooks/useAuth";
-import { fetchLiveKitToken, getLiveKitUrl, resolveResolution, clampResolution, clampFps } from "../../lib/livekit";
+import {
+  fetchLiveKitToken,
+  getLiveKitUrl,
+  resolveResolution,
+  clampResolution,
+  clampFps,
+  getRecommendedScreenShareQuality,
+} from "../../lib/livekit";
 import type { MediaLimits } from "../../lib/livekit";
 import { playJoin, playLeave, playMute, playUnmute, playDeafen, playUndeafen } from "../../lib/sounds";
 
@@ -143,6 +150,8 @@ function VoiceRoomContent({
   const [participantVolumes, setParticipantVolumes] = useState<
     Record<string, number>
   >({});
+  const [screenShareVolumes, setScreenShareVolumes] = useState<Record<string, number>>({});
+  const [screenShareMuted, setScreenShareMuted] = useState<Record<string, boolean>>({});
   const backgroundProcessorRef = useRef<ReturnType<typeof BackgroundProcessor> | null>(null);
   const rnnoiseProcessorRef = useRef<LiveKitRnnoiseProcessor | null>(null);
   const rnnoiseAudioContextRef = useRef<AudioContext | null>(null);
@@ -195,7 +204,8 @@ function VoiceRoomContent({
     };
   }, [room]);
 
-  // Mic enable/disable based on mute/deafen/PTT/noise suppression
+  // Mic enable/disable + RNNoise processing (merged to avoid race condition).
+  // setMicrophoneEnabled must complete before we can get the track to attach a processor.
   useEffect(() => {
     if (!room) return;
     if (room.state !== ConnectionState.Connected) return;
@@ -205,19 +215,9 @@ function VoiceRoomContent({
         await room.localParticipant.setMicrophoneEnabled(false);
         return;
       }
+
       await room.localParticipant.setMicrophoneEnabled(true, micCaptureOptions);
-    }
 
-    void applyMicState().catch(() => {
-      // Connection can drop while applying; ignore transient publish errors.
-    });
-  }, [room, pushToTalkEnabled, manualMute, deafened, micCaptureOptions]);
-
-  // Optional RNNoise processing on the published microphone track.
-  useEffect(() => {
-    if (!room || room.state !== ConnectionState.Connected) return;
-
-    async function applyAudioProcessor() {
       const micPublication = room.localParticipant.getTrackPublication(Track.Source.Microphone);
       const micTrack = micPublication?.track;
       if (!(micTrack instanceof LocalAudioTrack)) return;
@@ -249,8 +249,10 @@ function VoiceRoomContent({
       }
     }
 
-    void applyAudioProcessor();
-  }, [room, activeNoiseSuppressionMode]);
+    void applyMicState().catch(() => {
+      // Connection can drop while applying; ignore transient publish errors.
+    });
+  }, [room, pushToTalkEnabled, manualMute, deafened, micCaptureOptions, activeNoiseSuppressionMode]);
 
   // Open-mic input sensitivity gate: auto-mute the mic when below the threshold.
   useEffect(() => {
@@ -359,20 +361,30 @@ function VoiceRoomContent({
   ]);
 
   // Apply per-user volume (and deafen override) to all remote audio tracks.
+  // Microphone and screen share audio are controlled independently.
   useEffect(() => {
     if (!room) return;
 
-    function getEffectiveVolume(participantId: string) {
+    function getMicVolume(participantId: string) {
       if (deafened) return 0;
       return participantVolumes[participantId] ?? 1;
     }
 
+    function getScreenShareAudioVolume(participantId: string) {
+      if (deafened) return 0;
+      if (screenShareMuted[participantId]) return 0;
+      return screenShareVolumes[participantId] ?? 1;
+    }
+
     function applyVolumes() {
       room.remoteParticipants.forEach((participant) => {
-        const effectiveVolume = getEffectiveVolume(participant.identity);
         participant.getTrackPublications().forEach((pub) => {
           if (pub.track instanceof RemoteAudioTrack) {
-            pub.track.setVolume(effectiveVolume);
+            if (pub.source === Track.Source.ScreenShareAudio) {
+              pub.track.setVolume(getScreenShareAudioVolume(participant.identity));
+            } else {
+              pub.track.setVolume(getMicVolume(participant.identity));
+            }
           }
         });
       });
@@ -382,16 +394,19 @@ function VoiceRoomContent({
 
     function onTrackSubscribed(
       track: Track,
-      _publication: unknown,
+      publication: { source?: Track.Source },
       participant?: { identity: string }
     ) {
       if (track instanceof RemoteAudioTrack) {
-        const effectiveVolume = participant
-          ? getEffectiveVolume(participant.identity)
-          : deafened
-            ? 0
-            : 1;
-        track.setVolume(effectiveVolume);
+        if (deafened) {
+          track.setVolume(0);
+          return;
+        }
+        if (publication?.source === Track.Source.ScreenShareAudio) {
+          track.setVolume(participant ? getScreenShareAudioVolume(participant.identity) : 1);
+        } else {
+          track.setVolume(participant ? getMicVolume(participant.identity) : 1);
+        }
       }
     }
 
@@ -399,23 +414,22 @@ function VoiceRoomContent({
     return () => {
       room.off(RoomEvent.TrackSubscribed, onTrackSubscribed);
     };
-  }, [room, deafened, participantVolumes]);
+  }, [room, deafened, participantVolumes, screenShareVolumes, screenShareMuted]);
 
   // Remove stale per-user volume entries when participants leave.
   useEffect(() => {
     const activeIds = new Set(remoteParticipants.map((p) => p.identity));
-    setParticipantVolumes((prev) => {
-      const next: Record<string, number> = {};
+    function pruneRecord<T>(prev: Record<string, T>): Record<string, T> {
+      const next: Record<string, T> = {};
       let changed = false;
-      for (const [participantId, volume] of Object.entries(prev)) {
-        if (activeIds.has(participantId)) {
-          next[participantId] = volume;
-        } else {
-          changed = true;
-        }
+      for (const [id, val] of Object.entries(prev)) {
+        if (activeIds.has(id)) { next[id] = val; } else { changed = true; }
       }
       return changed ? next : prev;
-    });
+    }
+    setParticipantVolumes(pruneRecord);
+    setScreenShareVolumes(pruneRecord);
+    setScreenShareMuted(pruneRecord);
   }, [remoteParticipants]);
 
   // Apply preferred audio devices when joining room
@@ -587,9 +601,10 @@ function VoiceRoomContent({
   const toggleVideo = useCallback(() => {
     if (room.state !== ConnectionState.Connected) return;
     if (!isCameraEnabled) {
-      // Fixed camera quality profile for predictable behavior.
+      // Fixed camera quality profile for predictable behavior with lower
+      // encode load when someone is also sharing their screen.
       const defaultRes = "720p";
-      const defaultFps = 60;
+      const defaultFps = 30;
       const dims = resolveResolution(defaultRes);
       // Map to a VideoPreset for appropriate encoding bitrate
       const presetMap: Record<string, typeof VideoPresets.h720> = {
@@ -606,6 +621,8 @@ function VoiceRoomContent({
           resolution: { width: dims.width, height: dims.height, frameRate: defaultFps },
         },
         {
+          videoCodec: "h264",
+          backupCodec: false,
           videoEncoding: { maxBitrate: preset.encoding.maxBitrate, maxFramerate: defaultFps },
           simulcast: false,
         },
@@ -690,15 +707,38 @@ function VoiceRoomContent({
       const clampedRes = clampResolution(resolution, mediaLimits.maxScreenShareResolution);
       const clampedFps = clampFps(fps, mediaLimits.maxScreenShareFps);
       const dims = resolveResolution(clampedRes);
-      const screenShareBitrateByRes: Record<string, number> = {
-        "360p": 1_500_000,
-        "480p": 2_500_000,
-        "720p": 4_000_000,
-        "1080p": 7_000_000,
-        "1440p": 12_000_000,
-        "4k": 20_000_000,
-      };
-      const maxBitrate = screenShareBitrateByRes[clampedRes] ?? 4_000_000;
+      const motionHeavyShare = clampedFps >= 45;
+      const screenShareBitrateByRes: Record<string, number> = motionHeavyShare
+        ? {
+            "360p": 1_800_000,
+            "480p": 2_800_000,
+            "720p": 5_500_000,
+            "1080p": 10_000_000,
+            "1440p": 16_000_000,
+            "4k": 28_000_000,
+          }
+        : {
+            "360p": 800_000,
+            "480p": 1_400_000,
+            "720p": 2_500_000,
+            "1080p": 5_000_000,
+            "1440p": 8_000_000,
+            "4k": 14_000_000,
+          };
+      const useSimulcast = !motionHeavyShare;
+      const maxBitrate = screenShareBitrateByRes[clampedRes] ?? (motionHeavyShare ? 5_500_000 : 2_500_000);
+      const screenShareSimulcastLayers =
+        !useSimulcast
+          ? undefined
+          : clampedRes === "4k"
+            ? [VideoPresets.h360, VideoPresets.h1080]
+            : clampedRes === "1440p" || clampedRes === "1080p"
+              ? [VideoPresets.h360, VideoPresets.h720]
+              : clampedRes === "720p"
+                ? [VideoPresets.h180, VideoPresets.h360]
+                : clampedRes === "480p"
+                  ? [VideoPresets.h180]
+                  : undefined;
       await room.localParticipant.setScreenShareEnabled(
         true,
         {
@@ -707,14 +747,19 @@ function VoiceRoomContent({
             height: dims.height,
             frameRate: clampedFps,
           },
-          contentHint: "motion",
+          contentHint: motionHeavyShare ? "motion" : "detail",
           audio: true,
         },
         {
+          videoCodec: "h264",
+          backupCodec: false,
+          degradationPreference: motionHeavyShare ? "maintain-framerate" : "maintain-resolution",
+          simulcast: useSimulcast,
           videoEncoding: {
             maxBitrate,
             maxFramerate: clampedFps,
           },
+          screenShareSimulcastLayers,
         },
       );
       setIsScreenSharing(true);
@@ -737,8 +782,11 @@ function VoiceRoomContent({
     if (isScreenSharing) {
       await stopScreenShare();
     } else {
-      // Default: use server max limits (backward compat for sidebar button)
-      await startScreenShare(mediaLimits.maxScreenShareResolution, mediaLimits.maxScreenShareFps);
+      const recommended = getRecommendedScreenShareQuality(
+        mediaLimits.maxScreenShareResolution,
+        mediaLimits.maxScreenShareFps
+      );
+      await startScreenShare(recommended.resolution, recommended.fps);
     }
   }, [isScreenSharing, stopScreenShare, startScreenShare, mediaLimits]);
 
@@ -943,6 +991,10 @@ function VoiceRoomContent({
               onRequestScreenControl={onRequestScreenControl}
               onRevokeScreenControl={onRevokeScreenControl}
               onSendRemoteControlInput={onSendRemoteControlInput}
+              screenShareVolumes={screenShareVolumes}
+              screenShareMuted={screenShareMuted}
+              onScreenShareVolumeChange={(id, vol) => setScreenShareVolumes((prev) => ({ ...prev, [id]: vol }))}
+              onScreenShareMuteToggle={(id) => setScreenShareMuted((prev) => ({ ...prev, [id]: !(prev[id] ?? false) }))}
             />
           </div>
           {otherTiles.length > 0 && (
@@ -962,6 +1014,10 @@ function VoiceRoomContent({
                     onRequestScreenControl={onRequestScreenControl}
                     onRevokeScreenControl={onRevokeScreenControl}
                     onSendRemoteControlInput={onSendRemoteControlInput}
+                    screenShareVolumes={screenShareVolumes}
+                    screenShareMuted={screenShareMuted}
+                    onScreenShareVolumeChange={(id, vol) => setScreenShareVolumes((prev) => ({ ...prev, [id]: vol }))}
+                    onScreenShareMuteToggle={(id) => setScreenShareMuted((prev) => ({ ...prev, [id]: !(prev[id] ?? false) }))}
                   />
                 </div>
               ))}
@@ -989,6 +1045,10 @@ function VoiceRoomContent({
                 onRequestScreenControl={onRequestScreenControl}
                 onRevokeScreenControl={onRevokeScreenControl}
                 onSendRemoteControlInput={onSendRemoteControlInput}
+                screenShareVolumes={screenShareVolumes}
+                screenShareMuted={screenShareMuted}
+                onScreenShareVolumeChange={(id, vol) => setScreenShareVolumes((prev) => ({ ...prev, [id]: vol }))}
+                onScreenShareMuteToggle={(id) => setScreenShareMuted((prev) => ({ ...prev, [id]: !(prev[id] ?? false) }))}
               />
             </div>
           ))}
@@ -1016,6 +1076,10 @@ function TileContent({
   onRequestScreenControl,
   onRevokeScreenControl,
   onSendRemoteControlInput,
+  screenShareVolumes,
+  screenShareMuted,
+  onScreenShareVolumeChange,
+  onScreenShareMuteToggle,
 }: {
   tile:
     | { kind: "participant"; participant: ReturnType<typeof useParticipants>[number]; key: string }
@@ -1040,6 +1104,10 @@ function TileContent({
     deltaY?: number;
     key?: string;
   }) => void;
+  screenShareVolumes?: Record<string, number>;
+  screenShareMuted?: Record<string, boolean>;
+  onScreenShareVolumeChange?: (participantId: string, vol: number) => void;
+  onScreenShareMuteToggle?: (participantId: string) => void;
 }) {
   if (tile.kind === "screen") {
     const name = tile.participant.name || tile.participant.identity;
@@ -1053,6 +1121,8 @@ function TileContent({
       remoteControlSession!.controllerUserId === currentUserId;
     const pending = remoteControlPendingHostId === hostUserId;
     const canSendInput = Boolean(isControllerForHost && onSendRemoteControlInput);
+    const ssVolume = screenShareVolumes?.[hostUserId] ?? 1;
+    const ssMuted = screenShareMuted?.[hostUserId] ?? false;
     return (
       <div className="voice-tile screen">
         <VideoTrack trackRef={tile.trackRef} className="voice-tile-video" />
@@ -1087,34 +1157,73 @@ function TileContent({
           />
         )}
         {!isHost && (
-          <div style={{ position: "absolute", top: 8, right: 8, display: "flex", gap: 6 }}>
-            {isControllerForHost ? (
+          <>
+            <div style={{ position: "absolute", top: 8, right: 8, display: "flex", gap: 6 }}>
+              {isControllerForHost ? (
+                <button
+                  type="button"
+                  className="voice-btn danger"
+                  style={{ padding: "4px 8px", fontSize: 12 }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onRevokeScreenControl?.(remoteControlSession!.sessionId);
+                  }}
+                >
+                  Stop Control
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="voice-btn primary"
+                  style={{ padding: "4px 8px", fontSize: 12 }}
+                  disabled={pending || Boolean(hasActiveSessionForHost)}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onRequestScreenControl?.(hostUserId, roomId);
+                  }}
+                >
+                  {pending ? "Requesting..." : "Request Control"}
+                </button>
+              )}
+            </div>
+            <div
+              style={{
+                position: "absolute",
+                bottom: 28,
+                right: 8,
+                display: "flex",
+                alignItems: "center",
+                gap: 5,
+                background: "rgba(0,0,0,0.55)",
+                borderRadius: 6,
+                padding: "3px 7px",
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
               <button
                 type="button"
-                className="voice-btn danger"
-                style={{ padding: "4px 8px", fontSize: 12 }}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onRevokeScreenControl?.(remoteControlSession!.sessionId);
-                }}
+                style={{ background: "none", border: "none", cursor: "pointer", color: "white", display: "flex", alignItems: "center", padding: 0 }}
+                onClick={() => onScreenShareMuteToggle?.(hostUserId)}
+                title={ssMuted ? "Unmute stream" : "Mute stream"}
               >
-                Stop Control
+                {ssMuted ? <VolumeX size={13} /> : <Volume2 size={13} />}
               </button>
-            ) : (
-              <button
-                type="button"
-                className="voice-btn primary"
-                style={{ padding: "4px 8px", fontSize: 12 }}
-                disabled={pending || Boolean(hasActiveSessionForHost)}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onRequestScreenControl?.(hostUserId, roomId);
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={1}
+                className="voice-ctx-volume-slider"
+                style={{ width: 60 }}
+                value={ssMuted ? 0 : Math.round(ssVolume * 100)}
+                onChange={(e) => {
+                  const val = Number(e.target.value) / 100;
+                  if (val > 0 && ssMuted) onScreenShareMuteToggle?.(hostUserId);
+                  onScreenShareVolumeChange?.(hostUserId, val);
                 }}
-              >
-                {pending ? "Requesting..." : "Request Control"}
-              </button>
-            )}
-          </div>
+              />
+            </div>
+          </>
         )}
       </div>
     );

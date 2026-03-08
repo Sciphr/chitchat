@@ -206,12 +206,26 @@ body {
   -webkit-user-select: none;
 }
 
+.titlebar-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  pointer-events: none;
+}
+
 .titlebar-title {
   padding-left: 12px;
   font-size: 12px;
   font-weight: 600;
   color: var(--text-muted);
   letter-spacing: 0.02em;
+  pointer-events: none;
+}
+
+.titlebar-version {
+  font-size: 10px;
+  color: var(--text-muted);
+  opacity: 0.55;
   pointer-events: none;
 }
 
@@ -341,6 +355,64 @@ body {
   background: #1d4ed8;
   border-color: #1d4ed8;
   color: #fff;
+}
+
+.update-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 3000;
+}
+
+.update-overlay-box {
+  width: min(360px, calc(100vw - 32px));
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.5);
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.update-overlay-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.update-overlay-bar-track {
+  height: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.update-overlay-bar-fill {
+  height: 100%;
+  background: #2563eb;
+  border-radius: 3px;
+  transition: width 0.25s ease;
+}
+
+.update-overlay-status {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.update-overlay-done {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.update-overlay-done p {
+  font-size: 13px;
+  color: var(--text-secondary);
 }
 
 @keyframes titlebar-spin {
