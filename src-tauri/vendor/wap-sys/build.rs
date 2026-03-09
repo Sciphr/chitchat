@@ -4,7 +4,7 @@ use std::{
     env,
     fs::File,
     io::{BufWriter, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
 };
 
@@ -22,12 +22,8 @@ fn out_dir() -> PathBuf {
     std::env::var("OUT_DIR").expect("OUT_DIR environment var not set.").into()
 }
 
-/// Prefix specified symbols in a static library using objcopy --redefine-sym.
-fn prefix_archive_symbols(
-    archive_path: &std::path::Path,
-    symbols: &[String],
-    prefix: &str,
-) -> Result<()> {
+/// Prefix specified symbols in an object or static library using objcopy --redefine-sym.
+fn prefix_archive_symbols(archive_path: &Path, symbols: &[String], prefix: &str) -> Result<()> {
     if symbols.is_empty() {
         return Ok(());
     }
@@ -39,7 +35,7 @@ fn prefix_archive_symbols(
         prefix
     );
 
-    let temp_path = archive_path.with_extension("prefixed.a");
+    let temp_path = archive_path.with_extension("prefixed");
 
     let objcopy = determine_objcopy_path()?;
 
@@ -113,7 +109,7 @@ mod webrtc {
                 eprintln!("Couldn't find {LIB_NAME} with pkg-config:");
                 eprintln!("{e}");
                 return Ok((None, None));
-            },
+            }
         };
 
         Ok((lib.include_paths.first().cloned(), lib.link_paths.first().cloned()))
@@ -123,8 +119,6 @@ mod webrtc {
         _lib_dirs: &[PathBuf],
         _prefix: &str,
     ) -> Result<Vec<String>> {
-        // For non-bundled builds, we can't prefix symbols in the system library.
-        // Users would need to build with bundled feature for multi-version support.
         println!(
             "cargo:warning=Symbol prefixing is only supported with the 'bundled' feature. \
             Without it, linking multiple versions of this crate may cause symbol conflicts."
@@ -142,7 +136,6 @@ mod webrtc {
         collections::HashSet,
         fs,
         io::{BufRead, BufReader},
-        path::{Path, PathBuf},
         process::Command,
     };
 
@@ -158,29 +151,18 @@ mod webrtc {
             bundled_source_dir.clone(),
             bundled_source_dir.join("webrtc"),
         ];
-        // TODO(strohel): instead of hardcoding the paths, we should consult the pkgconfig file that
-        // the bundled webrtc-audio-processing build produces.
         let mut lib_paths = vec![
-            // MacOS, Arch Linux, baseline default
             out_dir().join("lib"),
-            // Ubuntu Linux (our CI)
             out_dir().join("lib").join("x86_64-linux-gnu"),
-            // Gentoo Linux (x86_64 multilib)
             out_dir().join("lib64"),
         ];
 
-        // Notes: c8896801 added support for 20250814, but the meson.build is still expecting
-        // >=20240722 and the subproject will fetch 20240722. If the build environment has 20250814
-        // installed, it should still pick it up and build successfully, though.
         if let Ok(mut lib) =
             pkg_config::Config::new().atleast_version("20240722").probe("absl_base")
         {
-            // If abseil package is installed locally, meson would have linked it for
-            // webrtc-audio-processing-2. Use the same library for our wrapper, too.
             include_paths.append(&mut lib.include_paths);
             lib_paths.append(&mut lib.link_paths);
         } else {
-            // Otherwise use the local build fetched and built by meson.
             include_paths.push(
                 bundled_source_dir
                     .join("subprojects")
@@ -235,8 +217,8 @@ mod webrtc {
 
         if cfg!(target_os = "windows") {
             let vscrt = match env::var("PROFILE").ok().as_deref() {
-                Some("debug") => "mtd",
-                _ => "mt",
+                Some("debug") => "mdd",
+                _ => "md",
             };
             meson.arg(format!("-Db_vscrt={vscrt}"));
         }
@@ -349,8 +331,6 @@ mod webrtc {
         Ok(())
     }
 
-    /// Prefix symbols in the built webrtc-audio-processing static library.
-    /// Returns the list of symbols that were renamed.
     pub(super) fn prefix_library_symbols(
         lib_dirs: &[PathBuf],
         prefix: &str,
@@ -448,8 +428,7 @@ mod webrtc {
         eprintln!("--- end meson-log.txt ---");
     }
 
-    /// Extract defined (non-external) symbols from a static library using nm.
-    fn get_defined_symbols(archive_path: &std::path::Path) -> Result<Vec<String>> {
+    fn get_defined_symbols(archive_path: &Path) -> Result<Vec<String>> {
         let nm = determine_nm_path()?;
         let output = Command::new(&nm)
             .arg("--defined-only")
@@ -466,8 +445,6 @@ mod webrtc {
         let mut symbols = HashSet::new();
 
         for line in stdout.lines() {
-            // POSIX format: "symbol_name type value size"
-            // We just need the first field (symbol name)
             if let Some(symbol) = line.split_whitespace().next() {
                 symbols.insert(symbol.to_string());
             }
@@ -482,16 +459,9 @@ struct CustomDeriveCallbacks;
 
 impl ParseCallbacks for CustomDeriveCallbacks {
     fn add_derives(&self, info: &DeriveInfo) -> Vec<String> {
-        // Matches EchoCanceller3Config, EchoCanceller3Config_Suppressor etc
         if info.name.starts_with("EchoCanceller3Config") && cfg!(feature = "serde") {
             vec!["serde::Deserialize".into(), "serde::Serialize".into()]
-        // Matches AudioProcessing_Config, AudioProcessing_Config_EchoCanceller etc
         } else if info.name.starts_with("AudioProcessing_Config") {
-            // Only derive Default for AudioProcessing_Config and its inner structs. bindgen Default
-            // implementation ignores C/C++ struct default values and thus misleading to enable
-            // globally. Note that we don't expose these defaults on `webrtc-audio-processing`
-            // level: they are needed only by the code that converts from prettified Rust config
-            // structs into their FFI variants to construct disabled/dummy values.
             vec!["Default".into()]
         } else {
             vec![]
@@ -500,8 +470,6 @@ impl ParseCallbacks for CustomDeriveCallbacks {
 
     fn add_attributes(&self, info: &AttributeInfo<'_>) -> Vec<String> {
         if info.name.starts_with("EchoCanceller3Config") {
-            // Prohibit construction of ffi EchoCanceller3Config and its children structs.
-            // The only allowed API is through the wrapper struct in the webrtc_audio_processing crate.
             vec!["#[non_exhaustive]".into()]
         } else {
             vec![]
@@ -513,8 +481,6 @@ fn main() -> Result<()> {
     webrtc::build_if_necessary()?;
     let (include_dirs, lib_dirs) = webrtc::get_build_paths()?;
 
-    // Prefix defined symbols in the webrtc library (bundled builds only)
-    // Returns the list of renamed symbols to update wrapper references later
     let renamed_symbols = webrtc::prefix_library_symbols(&lib_dirs, SYMBOL_PREFIX)?;
 
     for dir in &lib_dirs {
@@ -531,34 +497,23 @@ fn main() -> Result<()> {
         cc_build.define("WEBRTC_AEC3_CONFIG", None);
     }
 
-    // Set macos minimum version
     if cfg!(target_os = "macos") {
         let min_version = match env::var(MACOSX_DEPLOYMENT_TARGET_VAR) {
             Ok(ver) => ver,
-            Err(_) => {
-                String::from(match std::env::var("CARGO_CFG_TARGET_ARCH").unwrap().as_str() {
-                    "x86_64" => "10.10", // Using what I found here https://github.com/webrtc-uwp/chromium-build/blob/master/config/mac/mac_sdk.gni#L17
-                    "aarch64" => "11.0", // Apple silicon started here.
-                    arch => panic!("unknown arch: {}", arch),
-                })
-            },
+            Err(_) => String::from(match std::env::var("CARGO_CFG_TARGET_ARCH").unwrap().as_str() {
+                "x86_64" => "10.10",
+                "aarch64" => "11.0",
+                arch => panic!("unknown arch: {}", arch),
+            }),
         };
 
-        // `cc` doesn't try to pick up on this automatically, but `clang` needs it to
-        // generate a "correct" Objective-C symbol table which better matches XCode.
-        // See https://github.com/h4llow3En/mac-notification-sys/issues/45.
         cc_build.flag(format!("-mmacos-version-min={}", min_version));
     }
 
-    // This automatically emits "cargo:rustc-link-lib=static=webrtc_audio_processing_wrapper".
-    // The wrapper library should be linked before webrtc-audio-processing-2, otherwise strict
-    // linkers (like when passing -Wl,--as-needed) may discard the c++ library (automatically
-    // added by cc) from the linking list, resulting in build failure.
-    // The linking order should respect the dependency graph, i.e. wrapper -> webrtc-2.
     cc_build.cpp(true).file("src/wrapper.cpp").includes(&include_dirs);
 
     if cc_build.get_compiler().is_like_msvc() {
-        cc_build.static_crt(true).flag("/std:c++20").flag("/wd4100");
+        cc_build.flag("/std:c++20").flag("/wd4100");
     } else {
         cc_build.flag("-std=c++20").flag("-Wno-unused-parameter");
     }
@@ -567,18 +522,11 @@ fn main() -> Result<()> {
         .out_dir(out_dir())
         .compile("webrtc_audio_processing_wrapper");
 
-    // The the cc and bindgen commands emit `cargo:rerun-if-env-changed=...`, and these deactivate
-    // the default behavior to rerun if _any_ source file changes. So state these explicitly.
-    // build.rs is always included and doesn't have to be specified.
     println!("cargo:rerun-if-changed=src/wrapper.hpp");
     println!("cargo:rerun-if-changed=src/wrapper.cpp");
     println!("cargo:rerun-if-changed=webrtc-audio-processing");
 
-    // Prefix the wrapper library's references to webrtc symbols to match the renamed webrtc library.
-    let wrapper_lib = out_dir().join("libwebrtc_audio_processing_wrapper.a");
-    if wrapper_lib.exists() {
-        prefix_archive_symbols(&wrapper_lib, &renamed_symbols, SYMBOL_PREFIX)?;
-    }
+    prefix_wrapper_artifacts(&out_dir(), &renamed_symbols, SYMBOL_PREFIX)?;
 
     if cfg!(feature = "bundled") {
         println!("cargo:rustc-link-lib=static={LIB_NAME}");
@@ -597,13 +545,10 @@ fn main() -> Result<()> {
         .enable_cxx_namespaces();
 
     builder = builder
-        // Transitive dependencies are automatically included.
         .allowlist_function("webrtc_audio_processing_wrapper::.*")
         .opaque_type("std::.*")
         .parse_callbacks(Box::new(CustomDeriveCallbacks))
         .derive_debug(true)
-        // The default implementation ignores C++11's brace-or-equal-initializers,
-        // and thus misleading to enable. See also CustomDeriveCallbacks.
         .derive_default(false)
         .derive_partialeq(true);
     for dir in &include_dirs {
@@ -614,6 +559,31 @@ fn main() -> Result<()> {
         .expect("Unable to generate bindings")
         .write_to_file(&binding_file)
         .expect("Couldn't write bindings!");
+
+    Ok(())
+}
+
+fn prefix_wrapper_artifacts(out_dir: &Path, symbols: &[String], prefix: &str) -> Result<()> {
+    if symbols.is_empty() {
+        return Ok(());
+    }
+
+    for entry in std::fs::read_dir(out_dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        if file_name == "libwebrtc_audio_processing_wrapper.a"
+            || file_name == "webrtc_audio_processing_wrapper.lib"
+            || file_name.ends_with("wrapper.o")
+            || file_name.ends_with("wrapper.obj")
+        {
+            prefix_archive_symbols(&entry.path(), symbols, prefix)?;
+        }
+    }
 
     Ok(())
 }
@@ -651,16 +621,12 @@ fn determine_nm_path() -> Result<PathBuf> {
     })
 }
 
-/// Reliably determine a path to objcopy binary bundled with the active Rust toolchain (rust-objcopy)
 fn determine_objcopy_path() -> Result<PathBuf> {
     if let Some(path) = determine_llvm_tool_path("llvm-objcopy") {
         return Ok(path);
     }
 
-    // 1. Get the rustc command (this might be a path or just "rustc")
     let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
-
-    // 2. Ask rustc for the sysroot. This works even if RUSTC="rustc"
     let output = Command::new(&rustc)
         .arg("--print")
         .arg("sysroot")
@@ -673,17 +639,20 @@ fn determine_objcopy_path() -> Result<PathBuf> {
 
     let sysroot_str = String::from_utf8(output.stdout).context("Invalid UTF-8 in sysroot")?;
     let sysroot = PathBuf::from(sysroot_str.trim());
-
-    // 3. Construct the path: <sysroot>/lib/rustlib/<HOST_TRIPLE>/bin/rust-objcopy
-    // We use HOST because that is where the compiler (and tools) are running.
     let host = env::var("HOST").context("HOST env var not found")?;
 
-    let objcopy = sysroot.join("lib").join("rustlib").join(host).join("bin").join("rust-objcopy");
+    let objcopy = sysroot
+        .join("lib")
+        .join("rustlib")
+        .join(host)
+        .join("bin")
+        .join("rust-objcopy");
 
-    // Optional: verification
     if !objcopy.exists() {
         println!("cargo:warning=rust-objcopy not found at {:?}", objcopy);
-        println!("cargo:warning=Ensure the 'llvm-tools' component is installed: 'rustup component add llvm-tools'");
+        println!(
+            "cargo:warning=Ensure the 'llvm-tools' component is installed: 'rustup component add llvm-tools'"
+        );
     }
 
     Ok(objcopy)
