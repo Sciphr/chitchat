@@ -414,17 +414,23 @@ export default function Sidebar({
     }
 
     async function loadDevices() {
-      try {
-        let audioIn: DeviceOption[] = [];
-        let audioOut: DeviceOption[] = [];
-        const nativeInputLoader = voiceControls?.listAudioInputDevices;
+      let audioIn: DeviceOption[] = [];
+      let audioOut: DeviceOption[] = [];
+      let inputError: string | null = null;
+      const nativeInputLoader = voiceControls?.listAudioInputDevices;
 
-        if (nativeInputLoader) {
+      if (nativeInputLoader) {
+        try {
           audioIn = (await nativeInputLoader()).map((device) => ({
             deviceId: device.id,
             label: device.label,
           }));
-        } else if (navigator.mediaDevices?.enumerateDevices) {
+        } catch (err) {
+          inputError =
+            err instanceof Error ? err.message : "Unable to load microphone devices";
+        }
+      } else if (navigator.mediaDevices?.enumerateDevices) {
+        try {
           let devices = await navigator.mediaDevices.enumerateDevices();
           audioIn = mapBrowserDevices(devices, "audioinput");
 
@@ -436,9 +442,14 @@ export default function Sidebar({
             devices = await navigator.mediaDevices.enumerateDevices();
             audioIn = mapBrowserDevices(devices, "audioinput");
           }
+        } catch (err) {
+          inputError =
+            err instanceof Error ? err.message : "Unable to load microphone devices";
         }
+      }
 
-        if (navigator.mediaDevices?.enumerateDevices) {
+      if (navigator.mediaDevices?.enumerateDevices) {
+        try {
           let devices = await navigator.mediaDevices.enumerateDevices();
           audioOut = mapBrowserDevices(devices, "audiooutput");
           if (
@@ -449,21 +460,20 @@ export default function Sidebar({
             devices = await navigator.mediaDevices.enumerateDevices();
             audioOut = mapBrowserDevices(devices, "audiooutput");
           }
+        } catch {
+          audioOut = [];
         }
+      }
 
-        if (cancelled) return;
-        setAudioInputs(audioIn);
-        setAudioOutputs(audioOut);
-        if (audioIn.length <= 1 && audioOut.length <= 1) {
-          setDevicePickerError("Only default devices are currently available.");
-        } else {
-          setDevicePickerError(null);
-        }
-      } catch (err) {
-        if (cancelled) return;
-        setDevicePickerError(
-          err instanceof Error ? err.message : "Unable to load devices"
-        );
+      if (cancelled) return;
+      setAudioInputs(audioIn);
+      setAudioOutputs(audioOut);
+      if (inputError) {
+        setDevicePickerError(inputError);
+      } else if (audioIn.length <= 1 && audioOut.length <= 1) {
+        setDevicePickerError("Only default devices are currently available.");
+      } else {
+        setDevicePickerError(null);
       }
     }
 
@@ -787,6 +797,14 @@ export default function Sidebar({
     shareSourceKey && shareSources.length > 0
       ? shareSources.find((source) => `${source.kind}:${source.id}` === shareSourceKey) ?? null
       : null;
+
+  function getShareSourceKey(source: ScreenShareSource) {
+    return `${source.kind}:${source.id}`;
+  }
+
+  function getShareSourceKindLabel(kind: ScreenShareSource["kind"]) {
+    return kind === "screen" ? "Screen" : "Window";
+  }
 
   function getSafeCreateCategoryId(requested?: string) {
     const fallback = orderedCategories[0]?.id || "default";
@@ -2135,21 +2153,51 @@ export default function Sidebar({
                   {voiceControls.listScreenShareSources && (
                     <>
                       <label className="share-picker-label">Source</label>
-                      <select
-                        className="share-picker-select"
-                        value={shareSourceKey}
-                        onChange={(e) => setShareSourceKey(e.target.value)}
-                        disabled={shareSourcesLoading || shareSources.length === 0}
-                      >
-                        {shareSources.map((source) => (
-                          <option
-                            key={`${source.kind}:${source.id}`}
-                            value={`${source.kind}:${source.id}`}
-                          >
-                            {source.kind === "screen" ? "Screen" : "Window"}: {source.title}
-                          </option>
-                        ))}
-                      </select>
+                      <div className="share-source-grid" aria-live="polite">
+                        {shareSources.map((source) => {
+                          const sourceKey = getShareSourceKey(source);
+                          const kindLabel = getShareSourceKindLabel(source.kind);
+                          const isSelected = shareSourceKey === sourceKey;
+                          const aspectRatio =
+                            source.previewWidth && source.previewHeight
+                              ? `${source.previewWidth} / ${source.previewHeight}`
+                              : undefined;
+                          return (
+                            <button
+                              key={sourceKey}
+                              type="button"
+                              className={`share-source-card ${isSelected ? "selected" : ""}`}
+                              onClick={() => {
+                                setShareSourceKey(sourceKey);
+                                setSharePickerError(null);
+                              }}
+                              disabled={shareSourcesLoading}
+                              title={`${kindLabel}: ${source.title}`}
+                            >
+                              <div
+                                className="share-source-preview"
+                                style={aspectRatio ? { aspectRatio } : undefined}
+                              >
+                                {source.previewDataUrl ? (
+                                  <img
+                                    src={source.previewDataUrl}
+                                    alt={`${kindLabel} preview for ${source.title}`}
+                                  />
+                                ) : (
+                                  <div className="share-source-preview-fallback">
+                                    <span>{kindLabel}</span>
+                                  </div>
+                                )}
+                                <span className="share-source-kind">{kindLabel}</span>
+                              </div>
+                              <span className="share-source-title">{source.title}</span>
+                            </button>
+                          );
+                        })}
+                        {!shareSourcesLoading && shareSources.length === 0 && (
+                          <div className="share-source-empty">No shareable screens or windows found.</div>
+                        )}
+                      </div>
                     </>
                   )}
                   {sharePickerError && (
@@ -2165,13 +2213,13 @@ export default function Sidebar({
                       Boolean(voiceControls.listScreenShareSources && !selectedShareSource)
                     }
                     onClick={async () => {
-                      setShowSharePicker(false);
                       try {
                         await voiceControls.startScreenShare(
                           shareRes,
                           shareFps,
                           selectedShareSource ?? undefined
                         );
+                        setShowSharePicker(false);
                       } catch (err) {
                         setSharePickerError(
                           err instanceof Error ? err.message : "Failed to start screen share."

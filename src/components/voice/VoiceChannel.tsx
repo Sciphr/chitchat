@@ -184,7 +184,7 @@ function VoiceRoomContent({
   }) => void;
 }) {
   const room = useRoomContext();
-  const { isCameraEnabled } = useLocalParticipant();
+  const { localParticipant, isCameraEnabled } = useLocalParticipant();
   const participants = useParticipants();
   const tracks = useTracks(
     [
@@ -217,10 +217,17 @@ function VoiceRoomContent({
 
   const localIdentity = room.localParticipant.identity;
   const usesNativeMicrophone = supportsNativeMicrophoneCapture();
-  const visibleParticipants = useMemo(
-    () => participants.filter((participant) => !isHiddenCompanionIdentity(participant.identity)),
-    [participants]
-  );
+  const visibleParticipants = useMemo(() => {
+    const deduped = new Map<string, (typeof participants)[number] | typeof localParticipant>();
+    participants.forEach((participant) => {
+      if (isHiddenCompanionIdentity(participant.identity)) return;
+      deduped.set(participant.identity, participant);
+    });
+    if (localParticipant?.identity && !isHiddenCompanionIdentity(localParticipant.identity)) {
+      deduped.set(localParticipant.identity, localParticipant);
+    }
+    return Array.from(deduped.values());
+  }, [localParticipant, participants]);
   const nativeVoiceParticipants = useMemo(
     () =>
       participants.filter((participant) =>
@@ -734,11 +741,17 @@ function VoiceRoomContent({
     onParticipantsChange(roomId, mapped);
 
     const prevCount = prevCountRef.current;
-    const newCount = visibleParticipants.length;
+    const newCount = remoteParticipants.length;
     if (newCount > prevCount) playJoin();
     else if (newCount < prevCount) playLeave();
     prevCountRef.current = newCount;
-  }, [visibleParticipants, onParticipantsChange, roomId, speakingStateByIdentity]);
+  }, [
+    visibleParticipants,
+    remoteParticipants.length,
+    onParticipantsChange,
+    roomId,
+    speakingStateByIdentity,
+  ]);
 
   // Fast speaking indicator: fire immediately on ActiveSpeakersChanged event
   // instead of waiting for useParticipants() to re-render.
@@ -999,14 +1012,14 @@ function VoiceRoomContent({
       setScreenShareMode("browser");
       setIsScreenSharing(true);
     } catch (err) {
+      setIsScreenSharing(false);
+      setScreenShareMode(null);
       if (screenShareMode === "native") {
         void stopNativeScreenShare().catch(() => {});
       }
       if (err instanceof Error) {
         throw err;
       }
-      setIsScreenSharing(false);
-      setScreenShareMode(null);
     }
   }, [room, roomId, mediaLimits, livekitUrl, screenShareMode, serverUrl, authToken]);
 

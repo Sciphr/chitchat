@@ -7,7 +7,9 @@ use std::sync::{
 use std::thread::JoinHandle as ThreadJoinHandle;
 use std::time::Duration;
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use enigo::{Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
+use image::{codecs::png::PngEncoder, ColorType, ImageEncoder};
 use libwebrtc::{
     audio_source::native::NativeAudioSource,
     desktop_capturer::{
@@ -594,6 +596,12 @@ struct NativeScreenShareSource {
     id: u64,
     kind: String,
     title: String,
+    #[serde(rename = "previewDataUrl")]
+    preview_data_url: Option<String>,
+    #[serde(rename = "previewWidth")]
+    preview_width: Option<u32>,
+    #[serde(rename = "previewHeight")]
+    preview_height: Option<u32>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -658,6 +666,54 @@ impl CapturedFrame {
             timestamp_us: 0,
             buffer,
         }
+    }
+
+    fn to_preview_data_url(
+        &self,
+        max_width: u32,
+        max_height: u32,
+    ) -> Result<(String, u32, u32), String> {
+        let (preview_width, preview_height) =
+            fit_preview_dimensions(self.width, self.height, max_width, max_height);
+        let mut rgba = vec![0u8; preview_width as usize * preview_height as usize * 4];
+
+        for y in 0..preview_height {
+            let src_y =
+                ((y as f64 + 0.5) * self.height as f64 / preview_height as f64).floor() as u32;
+            for x in 0..preview_width {
+                let src_x =
+                    ((x as f64 + 0.5) * self.width as f64 / preview_width as f64).floor() as u32;
+                let (r, g, b) = sample_bgra(
+                    &self.data,
+                    self.stride,
+                    self.width,
+                    self.height,
+                    src_x,
+                    src_y,
+                );
+                let offset = ((y * preview_width + x) * 4) as usize;
+                rgba[offset] = r;
+                rgba[offset + 1] = g;
+                rgba[offset + 2] = b;
+                rgba[offset + 3] = 255;
+            }
+        }
+
+        let mut png = Vec::new();
+        PngEncoder::new(&mut png)
+            .write_image(
+                &rgba,
+                preview_width,
+                preview_height,
+                ColorType::Rgba8.into(),
+            )
+            .map_err(|err| err.to_string())?;
+
+        Ok((
+            format!("data:image/png;base64,{}", BASE64_STANDARD.encode(png)),
+            preview_width,
+            preview_height,
+        ))
     }
 }
 
@@ -795,6 +851,24 @@ fn resolution_bounds(preset: &str) -> (u32, u32) {
         "4k" => (3840, 2160),
         _ => (1280, 720),
     }
+}
+
+fn fit_preview_dimensions(
+    src_width: u32,
+    src_height: u32,
+    max_width: u32,
+    max_height: u32,
+) -> (u32, u32) {
+    if src_width == 0 || src_height == 0 {
+        return (1, 1);
+    }
+    let width_scale = max_width as f64 / src_width as f64;
+    let height_scale = max_height as f64 / src_height as f64;
+    let scale = width_scale.min(height_scale).min(1.0);
+    (
+        ((src_width as f64 * scale).round() as u32).max(1),
+        ((src_height as f64 * scale).round() as u32).max(1),
+    )
 }
 
 fn normalize_even(value: u32) -> u32 {
@@ -1229,7 +1303,43 @@ fn start_loopback_audio_capture(
     Ok((audio_task, audio_thread))
 }
 
-fn capture_sources_for(kind: DesktopCaptureSourceType) -> Vec<NativeScreenShareSource> {
+fn capture_preview_for_source(
+    kind: DesktopCaptureSourceType,
+    source: &CaptureSource,
+) -> Option<(String, u32, u32)> {
+    let mut capturer = DesktopCapturer::new(DesktopCapturerOptions::new(kind))?;
+    let (frame_tx, frame_rx) = mpsc::channel::<CapturedFrame>();
+    let frame_tx = Arc::new(Mutex::new(Some(frame_tx)));
+    let selected_source = source.clone();
+
+    capturer.start_capture(Some(selected_source), move |result| {
+        let Ok(frame) = result else {
+            return;
+        };
+        let captured = CapturedFrame {
+            width: frame.width().max(1) as u32,
+            height: frame.height().max(1) as u32,
+            stride: frame.stride() as usize,
+            data: frame.data().to_vec(),
+        };
+        if let Ok(mut sender_guard) = frame_tx.lock() {
+            if let Some(sender) = sender_guard.take() {
+                let _ = sender.send(captured);
+            }
+        }
+    });
+    capturer.capture_frame();
+
+    frame_rx
+        .recv_timeout(Duration::from_millis(900))
+        .ok()
+        .and_then(|captured| captured.to_preview_data_url(320, 180).ok())
+}
+
+fn capture_sources_for(
+    kind: DesktopCaptureSourceType,
+    include_previews: bool,
+) -> Vec<NativeScreenShareSource> {
     let options = DesktopCapturerOptions::new(kind);
     let Some(capturer) = DesktopCapturer::new(options) else {
         return Vec::new();
@@ -1243,10 +1353,20 @@ fn capture_sources_for(kind: DesktopCaptureSourceType) -> Vec<NativeScreenShareS
     capturer
         .get_source_list()
         .into_iter()
-        .map(|source| NativeScreenShareSource {
-            id: source.id(),
-            kind: source_kind.to_string(),
-            title: source.title(),
+        .map(|source| {
+            let preview = if include_previews {
+                capture_preview_for_source(kind, &source)
+            } else {
+                None
+            };
+            NativeScreenShareSource {
+                id: source.id(),
+                kind: source_kind.to_string(),
+                title: source.title(),
+                preview_data_url: preview.as_ref().map(|(data_url, _, _)| data_url.clone()),
+                preview_width: preview.as_ref().map(|(_, width, _)| *width),
+                preview_height: preview.as_ref().map(|(_, _, height)| *height),
+            }
         })
         .collect()
 }
@@ -1283,10 +1403,14 @@ async fn stop_native_screen_share_inner(manager: &NativeScreenShareManager) -> R
 }
 
 #[tauri::command]
-fn list_native_screen_share_sources() -> Vec<NativeScreenShareSource> {
-    let mut sources = capture_sources_for(DesktopCaptureSourceType::Screen);
-    sources.extend(capture_sources_for(DesktopCaptureSourceType::Window));
-    sources
+async fn list_native_screen_share_sources() -> Result<Vec<NativeScreenShareSource>, String> {
+    tokio::task::spawn_blocking(|| {
+        let mut sources = capture_sources_for(DesktopCaptureSourceType::Screen, true);
+        sources.extend(capture_sources_for(DesktopCaptureSourceType::Window, true));
+        sources
+    })
+    .await
+    .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -1300,7 +1424,7 @@ async fn start_native_screen_share(
         .source
         .clone()
         .or_else(|| {
-            capture_sources_for(DesktopCaptureSourceType::Screen)
+            capture_sources_for(DesktopCaptureSourceType::Screen, false)
                 .into_iter()
                 .next()
                 .map(|source| NativeScreenShareSourceSelection {

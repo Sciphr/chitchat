@@ -96,6 +96,9 @@ export interface ScreenShareSource {
   id: number;
   kind: "screen" | "window";
   title: string;
+  previewDataUrl?: string | null;
+  previewWidth?: number | null;
+  previewHeight?: number | null;
 }
 
 export interface AudioInputDeviceOption {
