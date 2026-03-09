@@ -476,12 +476,15 @@ fn main() -> Result<()> {
     // linkers (like when passing -Wl,--as-needed) may discard the c++ library (automatically
     // added by cc) from the linking list, resulting in build failure.
     // The linking order should respect the dependency graph, i.e. wrapper -> webrtc-2.
+    cc_build.cpp(true).file("src/wrapper.cpp").includes(&include_dirs);
+
+    if cc_build.get_compiler().is_like_msvc() {
+        cc_build.flag("/std:c++20").flag("/wd4100");
+    } else {
+        cc_build.flag("-std=c++20").flag("-Wno-unused-parameter");
+    }
+
     cc_build
-        .cpp(true)
-        .file("src/wrapper.cpp")
-        .includes(&include_dirs)
-        .flag("-std=c++20")
-        .flag("-Wno-unused-parameter")
         .out_dir(out_dir())
         .compile("webrtc_audio_processing_wrapper");
 
