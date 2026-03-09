@@ -187,8 +187,8 @@ mod webrtc {
                     .join("abseil-cpp-20240722.0"),
             );
             lib_paths.push(
-                out_dir()
-                    .join("webrtc-audio-processing")
+                bundled_work_dir()
+                    .join(BUNDLED_BUILD_PATH)
                     .join("subprojects")
                     .join("abseil-cpp-20240722.0"),
             );
@@ -264,6 +264,81 @@ mod webrtc {
             print_meson_log_tail(&build_dir);
         }
         assert!(status.success(), "Command failed: {:?}", &install);
+
+        create_windows_link_aliases(&build_dir, &install_dir)?;
+
+        Ok(())
+    }
+
+    fn create_windows_link_aliases(build_dir: &Path, install_dir: &Path) -> Result<()> {
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = build_dir;
+            let _ = install_dir;
+            return Ok(());
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            let install_lib_dir = install_dir.join("lib");
+            fs::create_dir_all(&install_lib_dir)?;
+
+            create_windows_lib_alias(
+                &install_lib_dir.join(format!("lib{LIB_NAME}.a")),
+                &install_lib_dir.join(format!("{LIB_NAME}.lib")),
+            )?;
+
+            let absl_build_dir = build_dir
+                .join("subprojects")
+                .join("abseil-cpp-20240722.0");
+
+            if absl_build_dir.exists() {
+                for entry in fs::read_dir(&absl_build_dir)? {
+                    let entry = entry?;
+                    let path = entry.path();
+                    if !entry.file_type()?.is_file() {
+                        continue;
+                    }
+
+                    let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+                        continue;
+                    };
+
+                    if !file_name.starts_with("libabsl_") || !file_name.ends_with(".a") {
+                        continue;
+                    }
+
+                    let alias_name = format!(
+                        "{}.lib",
+                        file_name
+                            .trim_start_matches("lib")
+                            .trim_end_matches(".a")
+                    );
+                    create_windows_lib_alias(&path, &install_lib_dir.join(alias_name))?;
+                }
+            }
+
+            Ok(())
+        }
+    }
+
+    fn create_windows_lib_alias(source: &Path, target: &Path) -> Result<()> {
+        if !source.exists() {
+            return Ok(());
+        }
+
+        if target.exists() {
+            fs::remove_file(target)
+                .with_context(|| format!("Failed to remove {}", target.display()))?;
+        }
+
+        fs::copy(source, target).with_context(|| {
+            format!(
+                "Failed to copy {} to {}",
+                source.display(),
+                target.display()
+            )
+        })?;
 
         Ok(())
     }
