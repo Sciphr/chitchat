@@ -33,6 +33,13 @@ jobs:
       - name: Install meson and ninja
         run: python -m pip install --upgrade pip meson ninja
 
+      - name: Install LLVM
+        shell: pwsh
+        run: |
+          choco install llvm -y --no-progress
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+          "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
       - name: Force MSVC for bundled native builds
         shell: pwsh
         run: |

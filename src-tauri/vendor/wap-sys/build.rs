@@ -508,6 +508,8 @@ fn main() -> Result<()> {
         println!("cargo:rustc-link-lib=dylib={LIB_NAME}");
     }
 
+    configure_libclang_path();
+
     let binding_file = out_dir().join("bindings.rs");
     let mut builder = bindgen::Builder::default()
         .header("src/wrapper.hpp")
@@ -535,6 +537,27 @@ fn main() -> Result<()> {
         .expect("Couldn't write bindings!");
 
     Ok(())
+}
+
+fn configure_libclang_path() {
+    if env::var_os("LIBCLANG_PATH").is_some() {
+        return;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        for candidate in [
+            r"C:\Program Files\LLVM\bin",
+            r"C:\Program Files (x86)\LLVM\bin",
+        ] {
+            let libclang = PathBuf::from(candidate).join("libclang.dll");
+            if libclang.exists() {
+                env::set_var("LIBCLANG_PATH", candidate);
+                println!("cargo:warning=Using libclang from {}", candidate);
+                return;
+            }
+        }
+    }
 }
 
 /// Reliably determine a path to objcopy binary bundled with the active Rust toolchain (rust-objcopy)
