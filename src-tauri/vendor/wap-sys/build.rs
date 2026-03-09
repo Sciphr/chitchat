@@ -138,16 +138,24 @@ mod webrtc {
 mod webrtc {
     use super::*;
     use anyhow::{bail, Context};
-    use std::{collections::HashSet, path::Path, process::Command};
+    use std::{
+        collections::HashSet,
+        fs,
+        path::{Path, PathBuf},
+        process::Command,
+    };
 
-    const BUNDLED_SOURCE_PATH: &str = "./webrtc-audio-processing";
+    const BUNDLED_SOURCE_PATH: &str = "webrtc-audio-processing";
+    const BUNDLED_SOURCE_COPY_PATH: &str = "webrtc-audio-processing-src";
+    const BUNDLED_BUILD_PATH: &str = "webrtc-audio-processing-build";
 
     pub(super) fn get_build_paths() -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+        let bundled_source_dir = bundled_source_dir();
         let mut include_paths = vec![
             out_dir().join("include"),
             out_dir().join("include").join(LIB_NAME),
-            src_dir().join("webrtc-audio-processing"),
-            src_dir().join("webrtc-audio-processing").join("webrtc"),
+            bundled_source_dir.clone(),
+            bundled_source_dir.join("webrtc"),
         ];
         // TODO(strohel): instead of hardcoding the paths, we should consult the pkgconfig file that
         // the bundled webrtc-audio-processing build produces.
@@ -173,8 +181,7 @@ mod webrtc {
         } else {
             // Otherwise use the local build fetched and built by meson.
             include_paths.push(
-                src_dir()
-                    .join("webrtc-audio-processing")
+                bundled_source_dir
                     .join("subprojects")
                     .join("abseil-cpp-20240722.0"),
             );
@@ -190,18 +197,24 @@ mod webrtc {
     }
 
     pub(super) fn build_if_necessary() -> Result<()> {
-        if Path::new(BUNDLED_SOURCE_PATH).read_dir()?.next().is_none() {
+        let vendor_source_dir = src_dir().join(BUNDLED_SOURCE_PATH);
+        if vendor_source_dir.read_dir()?.next().is_none() {
             eprintln!("The webrtc-audio-processing source directory is empty.");
             eprintln!("See the crate README for installation instructions.");
             eprintln!("Remember to clone the repo recursively if building from source.");
             bail!("Aborting compilation because bundled source directory is empty.");
         }
 
-        let build_dir = out_dir();
+        let build_dir = out_dir().join(BUNDLED_BUILD_PATH);
         let install_dir = out_dir();
+        let source_dir = bundled_source_dir();
 
-        let webrtc_build_dir = build_dir.join(BUNDLED_SOURCE_PATH);
-        eprintln!("Building webrtc-audio-processing in {}", webrtc_build_dir.display());
+        if !source_dir.exists() {
+            copy_dir_recursively(&vendor_source_dir, &source_dir)?;
+        }
+
+        fs::create_dir_all(&build_dir)?;
+        eprintln!("Building webrtc-audio-processing in {}", build_dir.display());
 
         let mut meson = Command::new("meson");
         meson.args(["setup", "--prefix", install_dir.to_str().unwrap()]);
@@ -215,22 +228,22 @@ mod webrtc {
 
         let status = meson
             .arg("-Ddefault_library=static")
-            .arg(BUNDLED_SOURCE_PATH)
-            .arg(webrtc_build_dir.to_str().unwrap())
+            .arg(source_dir.to_str().unwrap())
+            .arg(build_dir.to_str().unwrap())
             .status()
             .context("Failed to execute meson. Do you have it installed?")?;
         assert!(status.success(), "Command failed: {:?}", &meson);
 
         let mut ninja = Command::new("ninja");
         let status = ninja
-            .current_dir(&webrtc_build_dir)
+            .current_dir(&build_dir)
             .status()
             .context("Failed to execute ninja. Do you have it installed?")?;
         assert!(status.success(), "Command failed: {:?}", &ninja);
 
         let mut install = Command::new("ninja");
         let status = install
-            .current_dir(&webrtc_build_dir)
+            .current_dir(&build_dir)
             .arg("install")
             .status()
             .context("Failed to execute ninja install")?;
@@ -263,6 +276,38 @@ mod webrtc {
         std::env::var("CARGO_MANIFEST_DIR")
             .expect("CARGO_MANIFEST_DIR environment var not set.")
             .into()
+    }
+
+    fn bundled_source_dir() -> PathBuf {
+        out_dir().join(BUNDLED_SOURCE_COPY_PATH)
+    }
+
+    fn copy_dir_recursively(source: &Path, target: &Path) -> Result<()> {
+        fs::create_dir_all(target)
+            .with_context(|| format!("Failed to create {}", target.display()))?;
+
+        for entry in fs::read_dir(source)
+            .with_context(|| format!("Failed to read {}", source.display()))?
+        {
+            let entry = entry?;
+            let entry_type = entry.file_type()?;
+            let source_path = entry.path();
+            let target_path = target.join(entry.file_name());
+
+            if entry_type.is_dir() {
+                copy_dir_recursively(&source_path, &target_path)?;
+            } else if entry_type.is_file() {
+                fs::copy(&source_path, &target_path).with_context(|| {
+                    format!(
+                        "Failed to copy {} to {}",
+                        source_path.display(),
+                        target_path.display()
+                    )
+                })?;
+            }
+        }
+
+        Ok(())
     }
 
     /// Extract defined (non-external) symbols from a static library using nm.
