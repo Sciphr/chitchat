@@ -146,8 +146,8 @@ mod webrtc {
     };
 
     const BUNDLED_SOURCE_PATH: &str = "webrtc-audio-processing";
-    const BUNDLED_SOURCE_COPY_PATH: &str = "webrtc-audio-processing-src";
-    const BUNDLED_BUILD_PATH: &str = "webrtc-audio-processing-build";
+    const BUNDLED_SOURCE_COPY_PATH: &str = "src";
+    const BUNDLED_BUILD_PATH: &str = "build";
 
     pub(super) fn get_build_paths() -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
         let bundled_source_dir = bundled_source_dir();
@@ -205,7 +205,7 @@ mod webrtc {
             bail!("Aborting compilation because bundled source directory is empty.");
         }
 
-        let build_dir = out_dir().join(BUNDLED_BUILD_PATH);
+        let build_dir = bundled_work_dir().join(BUNDLED_BUILD_PATH);
         let install_dir = out_dir();
         let source_dir = bundled_source_dir();
 
@@ -279,7 +279,23 @@ mod webrtc {
     }
 
     fn bundled_source_dir() -> PathBuf {
-        out_dir().join(BUNDLED_SOURCE_COPY_PATH)
+        bundled_work_dir().join(BUNDLED_SOURCE_COPY_PATH)
+    }
+
+    fn bundled_work_dir() -> PathBuf {
+        #[cfg(target_os = "windows")]
+        {
+            let unique = out_dir()
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("wap");
+            return std::env::temp_dir().join("wap-sys").join(unique);
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            out_dir()
+        }
     }
 
     fn copy_dir_recursively(source: &Path, target: &Path) -> Result<()> {
