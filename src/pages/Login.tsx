@@ -28,6 +28,9 @@ export default function Login() {
     serverUrl,
     setServerUrl,
     servers,
+    homeServerUrl,
+    serverSessionStateByUrl,
+    serverDirectoryByUrl,
     switchServer,
     removeServer,
     signOutServer,
@@ -686,7 +689,18 @@ export default function Login() {
             </p>
             <div className="grid gap-2.5">
               {servers.map((server) => {
+                const directoryEntry = serverDirectoryByUrl[server.url];
                 const hasSavedLogin = Boolean(getServerToken(server.url));
+                const sessionState = serverSessionStateByUrl[server.url]
+                  ?? (hasSavedLogin ? "checking" : "login_required");
+                const sessionLabel =
+                  sessionState === "ready"
+                    ? "Signed in"
+                    : sessionState === "checking"
+                    ? "Checking saved login"
+                    : sessionState === "unreachable"
+                    ? "Server unreachable"
+                    : "Login required";
                 return (
                   <div key={server.url} className="login-server-item">
                     <button
@@ -694,8 +708,22 @@ export default function Login() {
                       className="login-server-switch"
                       onClick={() => handleSelectSavedServer(server.url)}
                     >
-                      <span className="login-server-name">{server.name || server.url}</span>
+                      <span className="login-server-avatar" aria-hidden="true">
+                        {directoryEntry?.iconUrl ? (
+                          <img src={directoryEntry.iconUrl} alt="" />
+                        ) : (
+                          (directoryEntry?.name || server.name || server.url)
+                            .trim()
+                            .charAt(0)
+                            .toUpperCase()
+                        )}
+                      </span>
+                      <span className="login-server-name">
+                        {directoryEntry?.name || server.name || server.url}
+                        {server.url === homeServerUrl ? " • Home" : ""}
+                      </span>
                       <span className="login-server-url">{server.url}</span>
+                      <span className="login-server-url">{sessionLabel}</span>
                     </button>
                     {hasSavedLogin ? (
                       <button

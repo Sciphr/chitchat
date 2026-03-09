@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, useCallback, useRef } from "react";
-import type { Room, VoiceControls } from "../../types";
+import type { Room, ScreenShareSource, VoiceControls } from "../../types";
 import {
   LiveKitRoom,
   RoomAudioRenderer,
@@ -15,6 +15,7 @@ import {
   Track,
   RoomEvent,
   ConnectionState,
+  AudioPresets,
   LocalAudioTrack,
   RemoteAudioTrack,
   LocalVideoTrack,
@@ -24,10 +25,9 @@ import {
 import { BackgroundProcessor, supportsBackgroundProcessors } from "@livekit/track-processors";
 import { LiveKitRnnoiseProcessor, supportsRnnoiseProcessing } from "../../lib/rnnoiseProcessor";
 import { Volume2, VolumeX } from "lucide-react";
-import { useAuth } from "../../hooks/useAuth";
+import type { Profile, UserInfo } from "../../hooks/useAuth";
 import {
   fetchLiveKitToken,
-  getLiveKitUrl,
   resolveResolution,
   clampResolution,
   clampFps,
@@ -35,9 +35,26 @@ import {
 } from "../../lib/livekit";
 import type { MediaLimits } from "../../lib/livekit";
 import { playJoin, playLeave, playMute, playUnmute, playDeafen, playUndeafen } from "../../lib/sounds";
+import {
+  isProbablyTauri,
+  listNativeScreenShareSources,
+  startNativeScreenShare,
+  stopNativeScreenShare,
+} from "../../lib/nativeScreenShare";
+import {
+  listNativeAudioInputDevices,
+  setNativeMicrophoneMuted,
+  startNativeMicrophone,
+  stopNativeMicrophone,
+} from "../../lib/nativeVoice";
 
 interface VoiceChannelProps {
   room: Room;
+  serverUrl: string;
+  livekitUrl: string;
+  authToken: string | null;
+  authUser: UserInfo | null;
+  authProfile: Profile;
   autoJoin?: boolean;
   onParticipantsChange?: (roomId: string, participants: VoiceParticipant[]) => void;
   onVoiceControlsChange?: (roomId: string, controls: VoiceControls | null) => void;
@@ -69,6 +86,41 @@ interface VoiceParticipant {
   isSpeaking: boolean;
 }
 
+const NATIVE_SCREEN_SHARE_SUFFIX = "::screenshare";
+const NATIVE_VOICE_SUFFIX = "::nativevoice";
+
+function isNativeScreenShareIdentity(identity?: string | null) {
+  return Boolean(identity && identity.endsWith(NATIVE_SCREEN_SHARE_SUFFIX));
+}
+
+function isNativeVoiceIdentity(identity?: string | null) {
+  return Boolean(identity && identity.endsWith(NATIVE_VOICE_SUFFIX));
+}
+
+function getHostIdentityFromScreenShareIdentity(identity?: string | null) {
+  if (!identity) return "";
+  return isNativeScreenShareIdentity(identity)
+    ? identity.slice(0, -NATIVE_SCREEN_SHARE_SUFFIX.length)
+    : identity;
+}
+
+function getHostIdentityFromNativeVoiceIdentity(identity?: string | null) {
+  if (!identity) return "";
+  return isNativeVoiceIdentity(identity)
+    ? identity.slice(0, -NATIVE_VOICE_SUFFIX.length)
+    : identity;
+}
+
+function isHiddenCompanionIdentity(identity?: string | null) {
+  return isNativeScreenShareIdentity(identity) || isNativeVoiceIdentity(identity);
+}
+
+function supportsNativeMicrophoneCapture() {
+  if (!isProbablyTauri()) return false;
+  if (typeof navigator === "undefined") return false;
+  return /windows/i.test(navigator.userAgent);
+}
+
 function VoiceRoomContent({
   onLeave,
   pushToTalkEnabled,
@@ -81,6 +133,9 @@ function VoiceRoomContent({
   preferredAudioInputId,
   preferredAudioOutputId,
   roomId,
+  serverUrl,
+  authToken,
+  livekitUrl,
   mediaLimits,
   onParticipantsChange,
   onVoiceControlsChange,
@@ -102,6 +157,9 @@ function VoiceRoomContent({
   preferredAudioInputId: string;
   preferredAudioOutputId: string;
   roomId: string;
+  serverUrl: string;
+  authToken: string | null;
+  livekitUrl: string;
   mediaLimits: MediaLimits;
   onParticipantsChange?: (roomId: string, participants: VoiceParticipant[]) => void;
   onVoiceControlsChange?: (roomId: string, controls: VoiceControls | null) => void;
@@ -152,15 +210,45 @@ function VoiceRoomContent({
   >({});
   const [screenShareVolumes, setScreenShareVolumes] = useState<Record<string, number>>({});
   const [screenShareMuted, setScreenShareMuted] = useState<Record<string, boolean>>({});
+  const [screenShareMode, setScreenShareMode] = useState<"browser" | "native" | null>(null);
   const backgroundProcessorRef = useRef<ReturnType<typeof BackgroundProcessor> | null>(null);
   const rnnoiseProcessorRef = useRef<LiveKitRnnoiseProcessor | null>(null);
   const rnnoiseAudioContextRef = useRef<AudioContext | null>(null);
 
   const localIdentity = room.localParticipant.identity;
-  const remoteParticipants = useMemo(
-    () => participants.filter((participant) => participant.identity !== localIdentity),
-    [participants, localIdentity]
+  const usesNativeMicrophone = supportsNativeMicrophoneCapture();
+  const visibleParticipants = useMemo(
+    () => participants.filter((participant) => !isHiddenCompanionIdentity(participant.identity)),
+    [participants]
   );
+  const nativeVoiceParticipants = useMemo(
+    () =>
+      participants.filter((participant) =>
+        isNativeVoiceIdentity(participant.identity)
+      ),
+    [participants]
+  );
+  const remoteParticipants = useMemo(
+    () => visibleParticipants.filter((participant) => participant.identity !== localIdentity),
+    [visibleParticipants, localIdentity]
+  );
+  const speakingStateByIdentity = useMemo(() => {
+    const next = new Map<string, boolean>();
+    visibleParticipants.forEach((participant) => {
+      next.set(
+        participant.identity,
+        (participant.audioLevel ?? 0) > 0.02 || Boolean(participant.isSpeaking)
+      );
+    });
+    nativeVoiceParticipants.forEach((participant) => {
+      const hostIdentity = getHostIdentityFromNativeVoiceIdentity(participant.identity);
+      if (!hostIdentity) return;
+      if ((participant.audioLevel ?? 0) > 0.02 || participant.isSpeaking) {
+        next.set(hostIdentity, true);
+      }
+    });
+    return next;
+  }, [visibleParticipants, nativeVoiceParticipants]);
 
   const formattedKey = useMemo(() => {
     if (!pushToTalkKey) return "Space";
@@ -184,11 +272,16 @@ function VoiceRoomContent({
       noiseSuppression:
         activeNoiseSuppressionMode === "standard" ||
         activeNoiseSuppressionMode === "aggressive",
-      echoCancellation: activeNoiseSuppressionMode !== "rnnoise",
-      autoGainControl:
+      // Keep echo cancellation on for all processed paths; it helps more than it hurts
+      // for typical laptop/headset use, and RNNoise still runs as a separate processor.
+      echoCancellation: activeNoiseSuppressionMode !== "off",
+      // Auto gain tends to create more pumping artifacts than it solves here.
+      autoGainControl: false,
+      channelCount:
         activeNoiseSuppressionMode === "aggressive" ||
-        activeNoiseSuppressionMode === "rnnoise",
-      channelCount: activeNoiseSuppressionMode === "aggressive" ? 1 : undefined,
+        activeNoiseSuppressionMode === "rnnoise"
+          ? 1
+          : undefined,
     }),
     [activeNoiseSuppressionMode]
   );
@@ -208,6 +301,7 @@ function VoiceRoomContent({
   // setMicrophoneEnabled must complete before we can get the track to attach a processor.
   useEffect(() => {
     if (!room) return;
+    if (usesNativeMicrophone) return;
     if (room.state !== ConnectionState.Connected) return;
 
     async function applyMicState() {
@@ -252,11 +346,20 @@ function VoiceRoomContent({
     void applyMicState().catch(() => {
       // Connection can drop while applying; ignore transient publish errors.
     });
-  }, [room, pushToTalkEnabled, manualMute, deafened, micCaptureOptions, activeNoiseSuppressionMode]);
+  }, [
+    room,
+    usesNativeMicrophone,
+    pushToTalkEnabled,
+    manualMute,
+    deafened,
+    micCaptureOptions,
+    activeNoiseSuppressionMode,
+  ]);
 
   // Open-mic input sensitivity gate: auto-mute the mic when below the threshold.
   useEffect(() => {
     if (!room) return;
+    if (usesNativeMicrophone) return;
     if (room.state !== ConnectionState.Connected) return;
     if (pushToTalkEnabled || pushToMuteEnabled || manualMute || deafened) return;
 
@@ -351,6 +454,7 @@ function VoiceRoomContent({
     };
   }, [
     room,
+    usesNativeMicrophone,
     pushToTalkEnabled,
     pushToMuteEnabled,
     manualMute,
@@ -360,6 +464,83 @@ function VoiceRoomContent({
     micCaptureOptions,
   ]);
 
+  const restartNativeMicrophone = useCallback(async (requestedDeviceId?: string) => {
+    if (!usesNativeMicrophone || room.state !== ConnectionState.Connected || !livekitUrl) {
+      return;
+    }
+
+    const availableDevices = await listNativeAudioInputDevices().catch(() => []);
+    const resolvedDeviceId =
+      requestedDeviceId && availableDevices.some((device) => device.id === requestedDeviceId)
+        ? requestedDeviceId
+        : "";
+
+    const nativeToken = await fetchLiveKitToken({
+      room: roomId,
+      userId: room.localParticipant.identity,
+      username: room.localParticipant.name || room.localParticipant.identity,
+      purpose: "native_voice",
+      serverUrl,
+      authToken,
+    });
+
+    await startNativeMicrophone({
+      livekitUrl,
+      token: nativeToken.token,
+      deviceId: resolvedDeviceId || undefined,
+      noiseSuppressionMode: activeNoiseSuppressionMode,
+      inputSensitivity: audioInputSensitivity,
+      startMuted: manualMute || deafened || pushToTalkEnabled,
+    });
+
+    setAudioInputDeviceId(resolvedDeviceId);
+  }, [
+    usesNativeMicrophone,
+    room,
+    livekitUrl,
+    roomId,
+    serverUrl,
+    authToken,
+    activeNoiseSuppressionMode,
+    audioInputSensitivity,
+    manualMute,
+    deafened,
+    pushToTalkEnabled,
+  ]);
+
+  useEffect(() => {
+    if (!usesNativeMicrophone) return;
+    if (room.state !== ConnectionState.Connected) {
+      void stopNativeMicrophone().catch(() => {});
+      return;
+    }
+
+    let cancelled = false;
+    void restartNativeMicrophone(preferredAudioInputId).catch((err) => {
+      if (cancelled) return;
+      console.error("Failed to start native microphone", err);
+    });
+
+    return () => {
+      cancelled = true;
+      void stopNativeMicrophone().catch(() => {});
+    };
+  }, [
+    usesNativeMicrophone,
+    room.state,
+    restartNativeMicrophone,
+    preferredAudioInputId,
+  ]);
+
+  useEffect(() => {
+    if (!usesNativeMicrophone || room.state !== ConnectionState.Connected) return;
+    void setNativeMicrophoneMuted(
+      manualMute || deafened || pushToTalkEnabled
+    ).catch(() => {
+      // Ignore transient native control failures during reconnects.
+    });
+  }, [usesNativeMicrophone, room.state, manualMute, deafened, pushToTalkEnabled]);
+
   // Apply per-user volume (and deafen override) to all remote audio tracks.
   // Microphone and screen share audio are controlled independently.
   useEffect(() => {
@@ -367,13 +548,14 @@ function VoiceRoomContent({
 
     function getMicVolume(participantId: string) {
       if (deafened) return 0;
-      return participantVolumes[participantId] ?? 1;
+      return participantVolumes[getHostIdentityFromNativeVoiceIdentity(participantId)] ?? 1;
     }
 
     function getScreenShareAudioVolume(participantId: string) {
+      const hostParticipantId = getHostIdentityFromScreenShareIdentity(participantId);
       if (deafened) return 0;
-      if (screenShareMuted[participantId]) return 0;
-      return screenShareVolumes[participantId] ?? 1;
+      if (screenShareMuted[hostParticipantId]) return 0;
+      return screenShareVolumes[hostParticipantId] ?? 1;
     }
 
     function applyVolumes() {
@@ -437,7 +619,7 @@ function VoiceRoomContent({
     let cancelled = false;
     async function applyPreferredDevices() {
       try {
-        if (preferredAudioInputId) {
+        if (!usesNativeMicrophone && preferredAudioInputId) {
           await room.switchActiveDevice("audioinput", preferredAudioInputId);
           if (!cancelled) setAudioInputDeviceId(preferredAudioInputId);
         }
@@ -457,7 +639,7 @@ function VoiceRoomContent({
     return () => {
       cancelled = true;
     };
-  }, [room, preferredAudioInputId, preferredAudioOutputId]);
+  }, [room, preferredAudioInputId, preferredAudioOutputId, usesNativeMicrophone]);
 
   // Push-to-talk / push-to-mute keyboard handler
   useEffect(() => {
@@ -479,6 +661,10 @@ function VoiceRoomContent({
       if (deafened || manualMute) return;
       if (isTypingTarget(e.target)) return;
       if (e.code === pushToTalkKey || e.key === pushToTalkKey) {
+        if (usesNativeMicrophone) {
+          void setNativeMicrophoneMuted(pushToMuteEnabled);
+          return;
+        }
         if (pushToTalkEnabled) {
           room.localParticipant.setMicrophoneEnabled(true, micCaptureOptions).catch(() => {
             // Ignore publish race while reconnecting.
@@ -493,6 +679,10 @@ function VoiceRoomContent({
 
     function onKeyUp(e: KeyboardEvent) {
       if (e.code === pushToTalkKey || e.key === pushToTalkKey) {
+        if (usesNativeMicrophone) {
+          void setNativeMicrophoneMuted(pushToTalkEnabled || manualMute || deafened);
+          return;
+        }
         if (pushToTalkEnabled) {
           room.localParticipant.setMicrophoneEnabled(false).catch(() => {
             // Ignore publish race while reconnecting.
@@ -519,25 +709,24 @@ function VoiceRoomContent({
     manualMute,
     deafened,
     micCaptureOptions,
+    usesNativeMicrophone,
   ]);
 
   // Report participants upward + play join/leave sounds for remote participants
   const prevCountRef = useRef(0);
-  const participantsRef = useRef(participants);
-  participantsRef.current = participants;
+  const participantsRef = useRef(visibleParticipants);
+  participantsRef.current = visibleParticipants;
 
   useEffect(() => {
     if (!onParticipantsChange) return;
     const dedupedById = new Map<string, VoiceParticipant>();
-    for (const participant of participants) {
+    for (const participant of visibleParticipants) {
       const id = participant.identity?.trim();
       if (!id) continue;
       const mappedParticipant: VoiceParticipant = {
         id,
         name: participant.name || id,
-        isSpeaking:
-          (participant.audioLevel ?? 0) > 0.02 ||
-          (participant.isSpeaking ?? false),
+        isSpeaking: speakingStateByIdentity.get(id) ?? false,
       };
       dedupedById.set(id, mappedParticipant);
     }
@@ -545,11 +734,11 @@ function VoiceRoomContent({
     onParticipantsChange(roomId, mapped);
 
     const prevCount = prevCountRef.current;
-    const newCount = participants.length;
+    const newCount = visibleParticipants.length;
     if (newCount > prevCount) playJoin();
     else if (newCount < prevCount) playLeave();
     prevCountRef.current = newCount;
-  }, [participants, onParticipantsChange, roomId]);
+  }, [visibleParticipants, onParticipantsChange, roomId, speakingStateByIdentity]);
 
   // Fast speaking indicator: fire immediately on ActiveSpeakersChanged event
   // instead of waiting for useParticipants() to re-render.
@@ -557,7 +746,14 @@ function VoiceRoomContent({
     if (!onParticipantsChange) return;
     const _onParticipantsChange = onParticipantsChange;
     function onActiveSpeakersChanged(speakers: { identity: string }[]) {
-      const speakingIds = new Set(speakers.map((s) => s.identity));
+      const speakingIds = new Set(
+        speakers
+          .map((speaker) => {
+            if (isNativeScreenShareIdentity(speaker.identity)) return "";
+            return getHostIdentityFromNativeVoiceIdentity(speaker.identity);
+          })
+          .filter(Boolean)
+      );
       const dedupedById = new Map<string, VoiceParticipant>();
       for (const participant of participantsRef.current) {
         const id = participant.identity?.trim();
@@ -565,7 +761,7 @@ function VoiceRoomContent({
         dedupedById.set(id, {
           id,
           name: participant.name || id,
-          isSpeaking: speakingIds.has(id) || (participant.audioLevel ?? 0) > 0.02,
+          isSpeaking: speakingIds.has(id) || speakingStateByIdentity.get(id) || false,
         });
       }
       _onParticipantsChange(roomId, Array.from(dedupedById.values()));
@@ -574,21 +770,22 @@ function VoiceRoomContent({
     return () => {
       room.off(RoomEvent.ActiveSpeakersChanged, onActiveSpeakersChanged);
     };
-  }, [room, onParticipantsChange, roomId]);
+  }, [room, onParticipantsChange, roomId, speakingStateByIdentity]);
 
   // Sync screen share state when user stops sharing via browser UI
   useEffect(() => {
     if (!room) return;
     function onTrackUnpublished(publication: { source?: Track.Source }) {
-      if (publication.source === Track.Source.ScreenShare) {
+      if (publication.source === Track.Source.ScreenShare && screenShareMode === "browser") {
         setIsScreenSharing(false);
+        setScreenShareMode(null);
       }
     }
     room.localParticipant.on("localTrackUnpublished", onTrackUnpublished);
     return () => {
       room.localParticipant.off("localTrackUnpublished", onTrackUnpublished);
     };
-  }, [room]);
+  }, [room, screenShareMode]);
 
   const toggleMute = useCallback(() => {
     setManualMute((prev) => {
@@ -697,15 +894,46 @@ function VoiceRoomContent({
     });
   }, [noiseSuppressionMode]);
 
-  const startScreenShare = useCallback(async (resolution: string, fps: number) => {
+  const listScreenShareSources = useCallback(async (): Promise<ScreenShareSource[]> => {
+    if (!isProbablyTauri()) return [];
+    return listNativeScreenShareSources();
+  }, []);
+
+  const startScreenShare = useCallback(async (
+    resolution: string,
+    fps: number,
+    source?: ScreenShareSource
+  ) => {
     if (room.state !== ConnectionState.Connected) {
       setIsScreenSharing(false);
+      setScreenShareMode(null);
       return;
     }
     try {
       // Clamp to server limits
       const clampedRes = clampResolution(resolution, mediaLimits.maxScreenShareResolution);
       const clampedFps = clampFps(fps, mediaLimits.maxScreenShareFps);
+      if (isProbablyTauri() && livekitUrl) {
+        const nativeToken = await fetchLiveKitToken({
+          room: roomId,
+          userId: room.localParticipant.identity,
+          username: room.localParticipant.name || room.localParticipant.identity,
+          purpose: "native_screenshare",
+          serverUrl,
+          authToken,
+        });
+        await startNativeScreenShare({
+          livekitUrl,
+          token: nativeToken.token,
+          source,
+          resolution: clampedRes,
+          fps: clampedFps,
+        });
+        setScreenShareMode("native");
+        setIsScreenSharing(true);
+        return;
+      }
+
       const dims = resolveResolution(clampedRes);
       const motionHeavyShare = clampedFps >= 45;
       const screenShareBitrateByRes: Record<string, number> = motionHeavyShare
@@ -737,7 +965,7 @@ function VoiceRoomContent({
               : clampedRes === "720p"
                 ? [VideoPresets.h180, VideoPresets.h360]
                 : clampedRes === "480p"
-                  ? [VideoPresets.h180]
+                ? [VideoPresets.h180]
                   : undefined;
       await room.localParticipant.setScreenShareEnabled(
         true,
@@ -748,9 +976,15 @@ function VoiceRoomContent({
             frameRate: clampedFps,
           },
           contentHint: motionHeavyShare ? "motion" : "detail",
+          // Let the browser decide which share-audio modes are supported for the
+          // selected surface. Custom audio constraints here can cause display
+          // capture to either drop the audio track or fail to start entirely.
           audio: true,
         },
         {
+          audioPreset: AudioPresets.musicHighQualityStereo,
+          dtx: false,
+          forceStereo: true,
           videoCodec: "h264",
           backupCodec: false,
           degradationPreference: motionHeavyShare ? "maintain-framerate" : "maintain-resolution",
@@ -762,21 +996,34 @@ function VoiceRoomContent({
           screenShareSimulcastLayers,
         },
       );
+      setScreenShareMode("browser");
       setIsScreenSharing(true);
-    } catch {
-      // User cancelled the screen picker dialog
+    } catch (err) {
+      if (screenShareMode === "native") {
+        void stopNativeScreenShare().catch(() => {});
+      }
+      if (err instanceof Error) {
+        throw err;
+      }
       setIsScreenSharing(false);
+      setScreenShareMode(null);
     }
-  }, [room, mediaLimits]);
+  }, [room, roomId, mediaLimits, livekitUrl, screenShareMode, serverUrl, authToken]);
 
   const stopScreenShare = useCallback(async () => {
     try {
-      await room.localParticipant.setScreenShareEnabled(false);
+      if (screenShareMode === "native") {
+        await stopNativeScreenShare();
+      } else {
+        await room.localParticipant.setScreenShareEnabled(false);
+      }
       setIsScreenSharing(false);
+      setScreenShareMode(null);
     } catch {
       setIsScreenSharing(false);
+      setScreenShareMode(null);
     }
-  }, [room]);
+  }, [room, screenShareMode]);
 
   const toggleScreenShare = useCallback(async () => {
     if (isScreenSharing) {
@@ -790,10 +1037,27 @@ function VoiceRoomContent({
     }
   }, [isScreenSharing, stopScreenShare, startScreenShare, mediaLimits]);
 
+  useEffect(() => {
+    return () => {
+      if (screenShareMode === "native") {
+        void stopNativeScreenShare().catch(() => {});
+      }
+    };
+  }, [screenShareMode]);
+
   const setAudioInputDevice = useCallback(
     async (deviceId: string) => {
       const prevDeviceId = audioInputDeviceId;
       setAudioInputDeviceId(deviceId);
+      if (usesNativeMicrophone) {
+        try {
+          await restartNativeMicrophone(deviceId);
+        } catch (err) {
+          setAudioInputDeviceId(prevDeviceId);
+          throw err;
+        }
+        return;
+      }
       if (deviceId) {
         try {
           await room.switchActiveDevice("audioinput", deviceId, true);
@@ -811,7 +1075,7 @@ function VoiceRoomContent({
         }
       }
     },
-    [room, audioInputDeviceId]
+    [room, audioInputDeviceId, usesNativeMicrophone, restartNativeMicrophone]
   );
 
   const setAudioOutputDevice = useCallback(
@@ -840,9 +1104,15 @@ function VoiceRoomContent({
 
   const handleLeave = useCallback(() => {
     playLeave();
+    if (usesNativeMicrophone) {
+      void stopNativeMicrophone().catch(() => {});
+    }
+    if (screenShareMode === "native") {
+      void stopNativeScreenShare().catch(() => {});
+    }
     room.disconnect();
     onLeave();
-  }, [room, onLeave]);
+  }, [room, onLeave, screenShareMode, usesNativeMicrophone]);
 
   // Report voice controls upward for the Sidebar
   useEffect(() => {
@@ -854,6 +1124,7 @@ function VoiceRoomContent({
       isCameraOn: isCameraEnabled ?? false,
       isScreenSharing,
       isNoiseSuppressionEnabled: noiseSuppressionEnabled,
+      usesNativeAudioInput: usesNativeMicrophone,
       toggleMute,
       toggleDeafen,
       toggleVideo,
@@ -861,6 +1132,8 @@ function VoiceRoomContent({
       toggleNoiseSuppression,
       startScreenShare,
       stopScreenShare,
+      listScreenShareSources,
+      listAudioInputDevices: usesNativeMicrophone ? listNativeAudioInputDevices : undefined,
       setAudioInputDevice,
       setAudioOutputDevice,
       audioInputDeviceId,
@@ -872,7 +1145,8 @@ function VoiceRoomContent({
       },
       participantVolumes,
       setParticipantVolume: (participantId: string, volume: number) => {
-        setParticipantVolumes((prev) => ({ ...prev, [participantId]: volume }));
+        const clamped = Math.min(Math.max(volume, 0), 2);
+        setParticipantVolumes((prev) => ({ ...prev, [participantId]: clamped }));
       },
     });
   }, [
@@ -889,6 +1163,8 @@ function VoiceRoomContent({
     toggleNoiseSuppression,
     startScreenShare,
     stopScreenShare,
+    listScreenShareSources,
+    usesNativeMicrophone,
     setAudioInputDevice,
     setAudioOutputDevice,
     audioInputDeviceId,
@@ -909,16 +1185,41 @@ function VoiceRoomContent({
 
   // Build unified tile list: participant cameras + screen shares
   type TileItem =
-    | { kind: "participant"; participant: (typeof participants)[number]; key: string }
-    | { kind: "screen"; trackRef: (typeof screenShareTracks)[number]; participant: (typeof participants)[number]; key: string };
+    | {
+        kind: "participant";
+        participant: (typeof visibleParticipants)[number];
+        key: string;
+        isSpeaking: boolean;
+      }
+    | {
+        kind: "screen";
+        trackRef: (typeof screenShareTracks)[number];
+        participant: (typeof visibleParticipants)[number];
+        hostUserId: string;
+        key: string;
+      };
 
   const tiles: TileItem[] = [];
-  participants.forEach((p) => {
-    tiles.push({ kind: "participant", participant: p, key: `cam-${p.identity}` });
+  visibleParticipants.forEach((p) => {
+    tiles.push({
+      kind: "participant",
+      participant: p,
+      key: `cam-${p.identity}`,
+      isSpeaking: speakingStateByIdentity.get(p.identity) ?? false,
+    });
   });
   screenShareTracks.forEach((t) => {
-    const p = participants.find((pp) => pp.identity === t.participant.identity);
-    if (p) tiles.push({ kind: "screen", trackRef: t, participant: p, key: `screen-${t.participant.identity}` });
+    const hostUserId = getHostIdentityFromScreenShareIdentity(t.participant.identity);
+    const p = visibleParticipants.find((pp) => pp.identity === hostUserId);
+    if (p) {
+      tiles.push({
+        kind: "screen",
+        trackRef: t,
+        participant: p,
+        hostUserId,
+        key: `screen-${hostUserId}`,
+      });
+    }
   });
 
   // Clear focus if the focused tile no longer exists
@@ -1082,8 +1383,19 @@ function TileContent({
   onScreenShareMuteToggle,
 }: {
   tile:
-    | { kind: "participant"; participant: ReturnType<typeof useParticipants>[number]; key: string }
-    | { kind: "screen"; trackRef: any; participant: ReturnType<typeof useParticipants>[number]; key: string };
+    | {
+        kind: "participant";
+        participant: ReturnType<typeof useParticipants>[number];
+        key: string;
+        isSpeaking: boolean;
+      }
+    | {
+        kind: "screen";
+        trackRef: any;
+        participant: ReturnType<typeof useParticipants>[number];
+        hostUserId: string;
+        key: string;
+      };
   currentUserId?: string | null;
   remoteControlSession?: {
     sessionId: string;
@@ -1111,7 +1423,7 @@ function TileContent({
 }) {
   if (tile.kind === "screen") {
     const name = tile.participant.name || tile.participant.identity;
-    const hostUserId = tile.participant.identity;
+    const hostUserId = tile.hostUserId;
     const isHost = currentUserId === hostUserId;
     const hasActiveSessionForHost =
       remoteControlSession &&
@@ -1228,16 +1540,18 @@ function TileContent({
       </div>
     );
   }
-  return <ParticipantTileCard participant={tile.participant} />;
+  return <ParticipantTileCard participant={tile.participant} isSpeakingOverride={tile.isSpeaking} />;
 }
 
 function ParticipantTileCard({
   participant,
+  isSpeakingOverride = false,
 }: {
   participant: ReturnType<typeof useParticipants>[number];
+  isSpeakingOverride?: boolean;
 }) {
-  const isSpeaking = useIsSpeaking(participant);
-  const fastSpeaking = (participant.audioLevel ?? 0) > 0.02;
+  const isSpeaking = useIsSpeaking(participant) || isSpeakingOverride;
+  const fastSpeaking = (participant.audioLevel ?? 0) > 0.02 || isSpeakingOverride;
   const name = participant.name || participant.identity;
   const cameraPub = participant.getTrackPublication(Track.Source.Camera);
   const isCameraOn = cameraPub?.isSubscribed && !cameraPub.isMuted;
@@ -1288,6 +1602,11 @@ const LIVEKIT_RECONNECT_POLICY = new DefaultReconnectPolicy([
 
 export default function VoiceChannel({
   room,
+  serverUrl,
+  livekitUrl,
+  authToken,
+  authUser,
+  authProfile,
   autoJoin = false,
   onParticipantsChange,
   onVoiceControlsChange,
@@ -1299,14 +1618,13 @@ export default function VoiceChannel({
   onRevokeScreenControl,
   onSendRemoteControlInput,
 }: VoiceChannelProps) {
-  const { user, profile } = useAuth();
   const [token, setToken] = useState<string | null>(null);
   const [mediaLimits, setMediaLimits] = useState<MediaLimits>(DEFAULT_MEDIA_LIMITS);
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const autoJoinAttemptedRef = useRef(false);
 
-  const livekitUrl = getLiveKitUrl();
+  const usesNativeMicrophone = supportsNativeMicrophoneCapture();
 
   useEffect(() => {
     autoJoinAttemptedRef.current = false;
@@ -1320,7 +1638,7 @@ export default function VoiceChannel({
   }, [onParticipantsChange, onVoiceControlsChange, room.id]);
 
   const handleJoin = useCallback(async () => {
-    if (!user) return;
+    if (!authUser) return;
     if (!livekitUrl) {
       setError("LiveKit URL is not configured.");
       return;
@@ -1331,8 +1649,10 @@ export default function VoiceChannel({
       setConnecting(true);
       const result = await fetchLiveKitToken({
         room: room.id,
-        userId: user.id,
-        username: profile.username,
+        userId: authUser.id,
+        username: authProfile.username,
+        serverUrl,
+        authToken,
       });
       setToken(result.token);
       setMediaLimits(result.mediaLimits);
@@ -1341,7 +1661,7 @@ export default function VoiceChannel({
     } finally {
       setConnecting(false);
     }
-  }, [user, livekitUrl, room.id, profile.username]);
+  }, [authUser, livekitUrl, room.id, authProfile.username, serverUrl, authToken]);
 
   const handleLeave = useCallback(() => {
     setToken(null);
@@ -1405,7 +1725,7 @@ export default function VoiceChannel({
             connect
             onDisconnected={handleLeave}
             data-lk-theme="default"
-            audio
+            audio={!usesNativeMicrophone}
             video={false}
             options={{
               adaptiveStream: true,
@@ -1420,16 +1740,19 @@ export default function VoiceChannel({
           >
             <VoiceRoomContent
               onLeave={handleLeave}
-              pushToTalkEnabled={profile.pushToTalkEnabled}
-              pushToMuteEnabled={profile.pushToMuteEnabled}
-              pushToTalkKey={profile.pushToTalkKey}
-              audioInputSensitivity={profile.audioInputSensitivity}
-              noiseSuppressionMode={profile.noiseSuppressionMode}
-              videoBackgroundMode={profile.videoBackgroundMode}
-              videoBackgroundImageUrl={profile.videoBackgroundImageUrl}
-              preferredAudioInputId={profile.audioInputId}
-              preferredAudioOutputId={profile.audioOutputId}
+              pushToTalkEnabled={authProfile.pushToTalkEnabled}
+              pushToMuteEnabled={authProfile.pushToMuteEnabled}
+              pushToTalkKey={authProfile.pushToTalkKey}
+              audioInputSensitivity={authProfile.audioInputSensitivity}
+              noiseSuppressionMode={authProfile.noiseSuppressionMode}
+              videoBackgroundMode={authProfile.videoBackgroundMode}
+              videoBackgroundImageUrl={authProfile.videoBackgroundImageUrl}
+              preferredAudioInputId={authProfile.audioInputId}
+              preferredAudioOutputId={authProfile.audioOutputId}
               roomId={room.id}
+              serverUrl={serverUrl}
+              authToken={authToken}
+              livekitUrl={livekitUrl}
               mediaLimits={mediaLimits}
               onParticipantsChange={onParticipantsChange}
               onVoiceControlsChange={onVoiceControlsChange}

@@ -54,15 +54,24 @@ export interface VoiceControls {
   isCameraOn: boolean;
   isScreenSharing: boolean;
   isNoiseSuppressionEnabled: boolean;
+  usesNativeAudioInput?: boolean;
   toggleMute: () => void;
   toggleDeafen: () => void;
   toggleVideo: () => void;
   toggleScreenShare: () => void;
   toggleNoiseSuppression: () => void;
   /** Start screen share with specific quality options */
-  startScreenShare: (resolution: string, fps: number) => void;
+  startScreenShare: (
+    resolution: string,
+    fps: number,
+    source?: ScreenShareSource
+  ) => Promise<void>;
   /** Stop screen share */
-  stopScreenShare: () => void;
+  stopScreenShare: () => Promise<void>;
+  /** Enumerate native capture sources when available */
+  listScreenShareSources?: () => Promise<ScreenShareSource[]>;
+  /** Enumerate native microphone devices when available */
+  listAudioInputDevices?: () => Promise<AudioInputDeviceOption[]>;
   /** Switch active microphone device (empty = default) */
   setAudioInputDevice: (deviceId: string) => Promise<void>;
   /** Switch active speaker device (empty = default) */
@@ -81,6 +90,17 @@ export interface VoiceControls {
   participantVolumes: Record<string, number>;
   /** Set local playback volume for a participant (0–1). */
   setParticipantVolume: (participantId: string, volume: number) => void;
+}
+
+export interface ScreenShareSource {
+  id: number;
+  kind: "screen" | "window";
+  title: string;
+}
+
+export interface AudioInputDeviceOption {
+  id: string;
+  label: string;
 }
 
 export interface Message {

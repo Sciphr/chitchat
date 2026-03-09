@@ -1,6 +1,11 @@
 import { useState, useEffect, useRef } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Bug, Heart, Minus, RefreshCw, Square, X } from "lucide-react";
+import packageJson from "../../../package.json";
+import {
+  listenForDesktopTrayActions,
+  syncDesktopTrayUpdateState,
+} from "../../lib/desktopTray";
 
 const TRAY_HINT_KEY = "chitchat-tray-hint-shown";
 
@@ -18,9 +23,11 @@ export default function TitleBar() {
   const [showIssueConfirm, setShowIssueConfirm] = useState(false);
   const [showTrayHint, setShowTrayHint] = useState(false);
   const [updateStatusKind, setUpdateStatusKind] = useState<"info" | "success" | "error">("info");
-  const [appVersion, setAppVersion] = useState<string | null>(null);
+  const [appVersion, setAppVersion] = useState<string | null>(packageJson.version);
+  const [availableUpdateVersion, setAvailableUpdateVersion] = useState<string | null>(null);
   const [updateProgress, setUpdateProgress] = useState<UpdateProgress | null>(null);
   const upToDateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const startupUpdateCheckRef = useRef(false);
 
   const isDesktop = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -34,24 +41,93 @@ export default function TitleBar() {
     };
   }, [isDesktop]);
 
-  async function handleCheckForUpdates() {
-    if (!isDesktop || checkingUpdate) return;
-    setUpdateStatus("Checking for updates...");
-    setUpdateStatusKind("info");
-    setCheckingUpdate(true);
-    try {
-      const { check } = await import("@tauri-apps/plugin-updater");
-      const update = await check();
-      if (!update) {
+  useEffect(() => {
+    if (!isDesktop || startupUpdateCheckRef.current) return;
+    startupUpdateCheckRef.current = true;
+    void checkForUpdates({ silent: true }).catch(() => {});
+  }, [isDesktop]);
+
+  useEffect(() => {
+    if (!isDesktop) return;
+    const label = checkingUpdate
+      ? "Checking for Updates..."
+      : updateProgress
+      ? updateProgress.phase === "done"
+        ? `Update Ready: v${updateProgress.version}`
+        : `Updating to v${updateProgress.version}...`
+      : availableUpdateVersion
+      ? `Install Update v${availableUpdateVersion}`
+      : "Check for Updates";
+    const enabled = !checkingUpdate && !updateProgress;
+    syncDesktopTrayUpdateState(label, enabled).catch(() => {});
+  }, [availableUpdateVersion, checkingUpdate, isDesktop, updateProgress]);
+
+  useEffect(() => {
+    if (!isDesktop) return;
+    let mounted = true;
+    let unlisten: (() => void) | null = null;
+
+    void listenForDesktopTrayActions((payload) => {
+      if (!mounted) return;
+      if (payload.action === "check_updates") {
+        void handleCheckForUpdates();
+      }
+    }).then((dispose) => {
+      if (!mounted) {
+        dispose();
+        return;
+      }
+      unlisten = dispose;
+    });
+
+    return () => {
+      mounted = false;
+      unlisten?.();
+    };
+  }, [isDesktop, checkingUpdate, availableUpdateVersion, updateProgress]);
+
+  async function checkForUpdates(options?: { silent?: boolean }) {
+    const silent = options?.silent ?? false;
+    const { check } = await import("@tauri-apps/plugin-updater");
+    const update = await check();
+    if (!update) {
+      setAvailableUpdateVersion(null);
+      if (!silent) {
+        setUpdateProgress(null);
         setUpdateStatus("You're up to date.");
         setUpdateStatusKind("success");
         upToDateTimerRef.current = setTimeout(() => setUpdateStatus(""), 4000);
+      }
+      return null;
+    }
+
+    setAvailableUpdateVersion(update.version);
+    if (!silent) {
+      setUpdateStatus(`Update available: v${update.version}`);
+      setUpdateStatusKind("info");
+    }
+    return update;
+  }
+
+  async function handleCheckForUpdates() {
+    if (!isDesktop || checkingUpdate) return;
+    setCheckingUpdate(true);
+    try {
+      if (upToDateTimerRef.current) {
+        clearTimeout(upToDateTimerRef.current);
+        upToDateTimerRef.current = null;
+      }
+      setUpdateStatus("Checking for updates...");
+      setUpdateStatusKind("info");
+      const update = await checkForUpdates();
+      if (!update) {
         return;
       }
 
       const nextVersion = update.version;
       let totalBytes = 0;
       let downloadedBytes = 0;
+      setAvailableUpdateVersion(nextVersion);
       setUpdateStatus("");
       setUpdateProgress({ version: nextVersion, percent: 0, phase: "downloading" });
       await update.downloadAndInstall((event) => {
@@ -72,6 +148,7 @@ export default function TitleBar() {
         setUpdateProgress({ version: nextVersion, percent: 100, phase: "installing" });
       });
       await update.close();
+      setAvailableUpdateVersion(null);
       setUpdateProgress({ version: nextVersion, percent: 100, phase: "done" });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
@@ -141,11 +218,21 @@ export default function TitleBar() {
           </button>
           {isDesktop && (
             <button
-              className="titlebar-btn"
+              className={`titlebar-btn ${
+                availableUpdateVersion && !checkingUpdate && !updateProgress
+                  ? "titlebar-btn-update-available"
+                  : ""
+              }`}
               onClick={handleCheckForUpdates}
               disabled={checkingUpdate}
               aria-label="Check for updates"
-              title={checkingUpdate ? "Checking for updates..." : "Check for updates"}
+              title={
+                checkingUpdate
+                  ? "Checking for updates..."
+                  : availableUpdateVersion
+                  ? `Install update v${availableUpdateVersion}`
+                  : "Check for updates"
+              }
             >
               <RefreshCw
                 size={14}

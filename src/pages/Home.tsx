@@ -12,12 +12,19 @@ import VoiceChannel from "../components/voice/VoiceChannel";
 import Settings from "./Settings";
 import ToastNotifications, { type Toast } from "../components/notifications/ToastNotifications";
 import { useSocket } from "../hooks/useSocket";
-import { useAuth } from "../hooks/useAuth";
+import { useAuth, type Profile, type UserInfo } from "../hooks/useAuth";
 import type { Room, RoomCategory, ServerUser, VoiceControls } from "../types";
 import { playDmNotification, playTextNotification } from "../lib/sounds";
+import { sendDesktopNotification } from "../lib/desktopNotifications";
+import {
+  listenForDesktopTrayActions,
+  syncDesktopTrayHomeServer,
+  syncDesktopTrayStatus,
+  syncDesktopTrayVoiceState,
+} from "../lib/desktopTray";
 import { detectRunningGame } from "../lib/gamePresence";
 import { applyRemoteControlInputNative } from "../lib/remoteControlNative";
-import { setLiveKitUrl } from "../lib/livekit";
+import { getLiveKitUrl, setLiveKitUrl } from "../lib/livekit";
 
 const isDesktop = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -37,6 +44,18 @@ type RemoteControlSession = {
   expiresAt: string;
   token?: string;
 };
+type PersistedVoiceSession = {
+  serverUrl: string;
+  livekitUrl: string;
+  authToken: string;
+  authUser: UserInfo;
+  authProfile: Profile;
+  room: Room;
+};
+
+function voiceSessionKey(serverUrl: string, roomId: string) {
+  return `${serverUrl}::${roomId}`;
+}
 
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -59,10 +78,16 @@ export default function Home() {
     signOut,
     serverUrl,
     servers,
+    homeServerUrl,
+    setHomeServer,
+    serverSessionStateByUrl,
+    serverDirectoryByUrl,
     switchServer,
     removeServer,
     signOutServer,
     getServerToken,
+    signInToSavedServerWithPassword,
+    signInToSavedServerWithTwoFactor,
   } = useAuth();
   const { socket, isConnected, isReconnecting, reconnect } = useSocket();
   const [rooms, setRooms] = useState<Room[]>([]);
@@ -79,6 +104,7 @@ export default function Home() {
   const [voiceControls, setVoiceControls] = useState<VoiceControls | null>(
     null
   );
+  const [voiceSession, setVoiceSession] = useState<PersistedVoiceSession | null>(null);
   const [connectedVoiceRoomId, setConnectedVoiceRoomId] = useState<string | null>(
     null
   );
@@ -139,6 +165,7 @@ export default function Home() {
   const [voiceSidebarCtxBusy, setVoiceSidebarCtxBusy] = useState(false);
   // Ref tracks the connected voice room without stale closure issues in socket listeners.
   const connectedVoiceRoomIdRef = useRef<string | null>(null);
+  const connectedVoiceSessionKeyRef = useRef<string | null>(null);
   useEffect(() => {
     dmVoiceRoomIdRef.current = dmVoiceRoomId;
   }, [dmVoiceRoomId]);
@@ -158,6 +185,13 @@ export default function Home() {
   const lastSentGameActivityRef = useRef<string | null>(null);
   const backgroundSocketsRef = useRef<Map<string, Socket>>(new Map());
   const [serverUnreadByUrl, setServerUnreadByUrl] = useState<Record<string, number>>({});
+  const [serverLoginPromptUrl, setServerLoginPromptUrl] = useState<string | null>(null);
+  const [serverLoginEmail, setServerLoginEmail] = useState("");
+  const [serverLoginPassword, setServerLoginPassword] = useState("");
+  const [serverLoginCode, setServerLoginCode] = useState("");
+  const [serverLoginChallengeToken, setServerLoginChallengeToken] = useState("");
+  const [serverLoginError, setServerLoginError] = useState("");
+  const [serverLoginSubmitting, setServerLoginSubmitting] = useState(false);
   const [remoteControlRequest, setRemoteControlRequest] =
     useState<RemoteControlIncomingRequest | null>(null);
   const [remoteControlSession, setRemoteControlSession] =
@@ -259,10 +293,15 @@ export default function Home() {
 
   // Redirect to login if not authenticated
   useEffect(() => {
-    if (!loading && !token) {
+    const hasFallbackSession = servers.some((server) => {
+      if (server.url === serverUrl) return false;
+      if (!getServerToken(server.url)) return false;
+      return serverSessionStateByUrl[server.url] !== "login_required";
+    });
+    if (!loading && !token && !hasFallbackSession) {
       navigate("/login");
     }
-  }, [loading, token, navigate]);
+  }, [loading, token, navigate, servers, serverUrl, getServerToken, serverSessionStateByUrl]);
 
   const fetchServerInfo = useCallback(
     async (signal?: AbortSignal) => {
@@ -592,7 +631,7 @@ export default function Home() {
 
   const handleParticipantsChange = useCallback(
     (
-      roomId: string,
+      roomKey: string,
       participants: Array<{ id: string; name: string; isSpeaking: boolean }>
     ) => {
       setVoiceParticipants((prev) => {
@@ -602,10 +641,10 @@ export default function Home() {
         // Don't wipe server-reported participants when VoiceChannel unmounts without
         // having connected to LiveKit (e.g. user viewed the channel but didn't join).
         // Only allow clearing when we were actually connected to this room via LiveKit.
-        if (nextParticipants.length === 0 && connectedVoiceRoomIdRef.current !== roomId) {
+        if (nextParticipants.length === 0 && connectedVoiceSessionKeyRef.current !== roomKey) {
           return prev;
         }
-        const prevParticipants = prev[roomId] ?? [];
+        const prevParticipants = prev[roomKey] ?? [];
         const isSameLength = prevParticipants.length === nextParticipants.length;
         const isSameSnapshot =
           isSameLength &&
@@ -618,7 +657,7 @@ export default function Home() {
             );
           });
         if (isSameSnapshot) return prev;
-        return { ...prev, [roomId]: nextParticipants };
+        return { ...prev, [roomKey]: nextParticipants };
       });
     },
     []
@@ -1181,11 +1220,14 @@ export default function Home() {
   }, [isConnected, socket]);
 
   const handleVoiceControlsChange = useCallback(
-    (roomId: string, controls: VoiceControls | null) => {
+    (session: PersistedVoiceSession, roomKey: string, controls: VoiceControls | null) => {
+      const roomId = session.room.id;
       setVoiceControls(controls);
       if (controls) {
+        setVoiceSession(session);
         setConnectedVoiceRoomId((prev) => (prev === roomId ? prev : roomId));
         setPendingAutoJoinVoiceRoomId((prev) => (prev === roomId ? null : prev));
+        connectedVoiceSessionKeyRef.current = roomKey;
         // Only mark as connected and notify the server once LiveKit is actually
         // connected. VoiceRoomContent fires this callback on mount with
         // isConnected:false, before LiveKit finishes handshaking. Setting the
@@ -1194,23 +1236,35 @@ export default function Home() {
         // room is still connecting.
         if (controls.isConnected) {
           connectedVoiceRoomIdRef.current = roomId;
-          // voice:join is only for permanent voice channels (server ignores DM rooms)
-          socket.emit("voice:join", { roomId });
+          if (session.serverUrl === serverUrl) {
+            // voice:join is only for permanent voice channels (server ignores DM rooms)
+            socket.emit("voice:join", { roomId });
+          }
         }
       } else {
         setConnectedVoiceRoomId((prev) => (prev === roomId ? null : prev));
         if (connectedVoiceRoomIdRef.current === roomId) {
           connectedVoiceRoomIdRef.current = null;
         }
+        if (connectedVoiceSessionKeyRef.current === roomKey) {
+          connectedVoiceSessionKeyRef.current = null;
+          setVoiceSession((prev) =>
+            prev && voiceSessionKey(prev.serverUrl, prev.room.id) === roomKey ? null : prev
+          );
+        }
         // If this was an active DM call, end it for both parties
         if (dmVoiceRoomIdRef.current === roomId) {
           setDmVoiceRoomId(null);
-          socket.emit("dm:call:end", { dmRoomId: roomId });
+          if (session.serverUrl === serverUrl) {
+            socket.emit("dm:call:end", { dmRoomId: roomId });
+          }
         }
-        socket.emit("voice:leave", { roomId });
+        if (session.serverUrl === serverUrl) {
+          socket.emit("voice:leave", { roomId });
+        }
       }
     },
-    [socket]
+    [socket, serverUrl]
   );
 
   const markRoomRead = useCallback((roomId: string) => {
@@ -1272,9 +1326,6 @@ export default function Home() {
         shouldNotifyByRoom &&
         profile.desktopNotificationsEnabled &&
         shouldDesktopNotifyByProfile &&
-        typeof window !== "undefined" &&
-        "Notification" in window &&
-        Notification.permission === "granted" &&
         document.visibilityState !== "visible";
 
       if (shouldNotifyByRoom && soundEnabled) {
@@ -1291,17 +1342,11 @@ export default function Home() {
         if (now - lastDesktopNotificationAtRef.current > 750) {
           const title = room?.type === "dm" ? "New direct message" : `#${room?.name || "channel"}`;
           const body = `${payload.content || "(attachment)"}`.trim().slice(0, 180);
-          const notification = new Notification(title, {
+          void sendDesktopNotification({
+            title,
             body,
             tag: `room:${payload.room_id}`,
           });
-          notification.onclick = () => {
-            try {
-              window.focus();
-            } catch {
-              // no-op
-            }
-          };
           lastDesktopNotificationAtRef.current = now;
         }
       }
@@ -1388,6 +1433,165 @@ export default function Home() {
     [profile, updateProfile]
   );
 
+  const homeServerLabel = useMemo(() => {
+    const preferredUrl = homeServerUrl || serverUrl;
+    if (!preferredUrl) return "Home Server";
+    return (
+      serverDirectoryByUrl[preferredUrl]?.name?.trim()
+      || servers.find((entry) => entry.url === preferredUrl)?.name
+      || preferredUrl
+    );
+  }, [homeServerUrl, serverUrl, serverDirectoryByUrl, servers]);
+
+  useEffect(() => {
+    if (!isDesktop) return;
+    const nextStatus = profile.status || "online";
+    syncDesktopTrayStatus(nextStatus).catch(() => {});
+  }, [profile.status]);
+
+  useEffect(() => {
+    if (!isDesktop) return;
+    syncDesktopTrayHomeServer(homeServerLabel).catch(() => {});
+  }, [homeServerLabel]);
+
+  useEffect(() => {
+    if (!isDesktop) return;
+    syncDesktopTrayVoiceState({
+      connected: Boolean(voiceControls?.isConnected),
+      muted: Boolean(voiceControls?.isMuted),
+      deafened: Boolean(voiceControls?.isDeafened),
+    }).catch(() => {});
+  }, [voiceControls?.isConnected, voiceControls?.isMuted, voiceControls?.isDeafened]);
+
+  useEffect(() => {
+    if (!isDesktop) return;
+    let mounted = true;
+    let unlisten: (() => void) | null = null;
+
+    void listenForDesktopTrayActions((payload) => {
+      if (!mounted) return;
+      switch (payload.action) {
+        case "open_home_server":
+          switchServer(homeServerUrl || serverUrl);
+          break;
+        case "toggle_mute":
+          if (voiceControls?.isConnected) {
+            voiceControls.toggleMute();
+          }
+          break;
+        case "toggle_deafen":
+          if (voiceControls?.isConnected) {
+            voiceControls.toggleDeafen();
+          }
+          break;
+        case "disconnect_voice":
+          if (voiceControls?.isConnected) {
+            voiceControls.disconnect();
+          }
+          break;
+        case "set_status":
+          if (
+            payload.value === "online"
+            || payload.value === "away"
+            || payload.value === "dnd"
+            || payload.value === "offline"
+          ) {
+            void handleStatusChange(payload.value);
+          }
+          break;
+        default:
+          break;
+      }
+    }).then((dispose) => {
+      if (!mounted) {
+        dispose();
+        return;
+      }
+      unlisten = dispose;
+    });
+
+    return () => {
+      mounted = false;
+      unlisten?.();
+    };
+  }, [
+    handleStatusChange,
+    homeServerUrl,
+    serverUrl,
+    switchServer,
+    voiceControls,
+  ]);
+
+  const openServerLoginPrompt = useCallback((targetServerUrl: string) => {
+    setServerLoginPromptUrl(targetServerUrl);
+    setServerLoginEmail(user?.email ?? "");
+    setServerLoginChallengeToken("");
+    setServerLoginCode("");
+    setServerLoginPassword("");
+    setServerLoginError("");
+  }, [user?.email]);
+
+  const closeServerLoginPrompt = useCallback(() => {
+    setServerLoginPromptUrl(null);
+    setServerLoginChallengeToken("");
+    setServerLoginCode("");
+    setServerLoginPassword("");
+    setServerLoginError("");
+    setServerLoginSubmitting(false);
+  }, []);
+
+  const submitServerLoginPrompt = useCallback(async () => {
+    if (!serverLoginPromptUrl) return;
+    setServerLoginSubmitting(true);
+    setServerLoginError("");
+    try {
+      const result = serverLoginChallengeToken
+        ? await signInToSavedServerWithTwoFactor(
+            serverLoginPromptUrl,
+            serverLoginChallengeToken,
+            serverLoginCode.trim()
+          )
+        : await signInToSavedServerWithPassword(
+            serverLoginPromptUrl,
+            serverLoginEmail.trim(),
+            serverLoginPassword
+          );
+
+      if (result.error) {
+        setServerLoginError(result.error);
+        return;
+      }
+
+      const nextChallengeToken = (result as { challengeToken?: string }).challengeToken;
+      if (
+        !serverLoginChallengeToken &&
+        "requiresTwoFactor" in result &&
+        Boolean(result.requiresTwoFactor) &&
+        typeof nextChallengeToken === "string"
+      ) {
+        setServerLoginChallengeToken(nextChallengeToken);
+        setServerLoginCode("");
+        setServerLoginPassword("");
+        return;
+      }
+
+      closeServerLoginPrompt();
+      switchServer(serverLoginPromptUrl);
+    } finally {
+      setServerLoginSubmitting(false);
+    }
+  }, [
+    serverLoginPromptUrl,
+    serverLoginChallengeToken,
+    serverLoginCode,
+    serverLoginEmail,
+    serverLoginPassword,
+    signInToSavedServerWithPassword,
+    signInToSavedServerWithTwoFactor,
+    closeServerLoginPrompt,
+    switchServer,
+  ]);
+
   useEffect(() => {
     if (!isConnected || !user?.id) return;
 
@@ -1434,7 +1638,8 @@ export default function Home() {
       const url = (server.url || "").trim().replace(/\/+$/, "");
       if (!url || url === serverUrl) continue;
       const tokenForServer = getServerToken(url);
-      if (!tokenForServer) continue;
+      const sessionState = serverSessionStateByUrl[url];
+      if (!tokenForServer || (sessionState !== "ready" && sessionState !== "checking")) continue;
       desired.add(url);
 
       let bgSocket = sockets.get(url);
@@ -1471,7 +1676,7 @@ export default function Home() {
     return () => {
       // Keep long-lived background sockets while this screen is mounted.
     };
-  }, [servers, serverUrl, getServerToken]);
+  }, [servers, serverUrl, getServerToken, serverSessionStateByUrl]);
 
   useEffect(() => {
     return () => {
@@ -1485,13 +1690,17 @@ export default function Home() {
 
   // Tray badge: update tooltip with total unread count
   const totalUnread = useMemo(
-    () => Object.values(unreadByRoom).reduce((a, b) => a + b, 0),
-    [unreadByRoom]
+    () =>
+      Object.values(unreadByRoom).reduce((a, b) => a + b, 0)
+      + Object.entries(serverUnreadByUrl)
+        .filter(([url]) => url !== serverUrl)
+        .reduce((sum, [, count]) => sum + count, 0),
+    [unreadByRoom, serverUnreadByUrl, serverUrl]
   );
 
   useEffect(() => {
     if (!isDesktop) return;
-    invoke("set_tray_badge", { count: totalUnread }).catch(() => {});
+    invoke("set_desktop_unread_badge", { count: totalUnread }).catch(() => {});
   }, [totalUnread]);
 
   const activeVoiceRoom =
@@ -1512,7 +1721,48 @@ export default function Home() {
     if ((activeCall.participantIds || []).includes(user?.id || "")) return activeCall.room;
     return null;
   }, [activeCall, user?.id]);
-  const voiceSessionRoom = connectedVoiceRoom || activeVoiceRoom || connectedDmVoiceRoom || callRoom;
+  const persistedVoiceRoom = useMemo(() => {
+    if (!voiceSession) return null;
+    if (voiceSession.serverUrl !== serverUrl) {
+      return voiceSession.room;
+    }
+    if (voiceSession.room.type === "voice") {
+      return (
+        rooms.find((room) => room.type === "voice" && room.id === voiceSession.room.id)
+        ?? voiceSession.room
+      );
+    }
+    return dmRooms.find((room) => room.id === voiceSession.room.id) ?? voiceSession.room;
+  }, [voiceSession, serverUrl, rooms, dmRooms]);
+  const voiceSessionRoom =
+    persistedVoiceRoom || connectedVoiceRoom || activeVoiceRoom || connectedDmVoiceRoom || callRoom;
+  const renderedVoiceSession = useMemo<PersistedVoiceSession | null>(() => {
+    if (voiceSession && voiceSessionRoom) {
+      return { ...voiceSession, room: voiceSessionRoom };
+    }
+    if (!voiceSessionRoom || !token || !user) return null;
+    const livekitUrl = getLiveKitUrl(serverUrl);
+    if (!livekitUrl) return null;
+    return {
+      serverUrl,
+      livekitUrl,
+      authToken: token,
+      authUser: user,
+      authProfile: profile,
+      room: voiceSessionRoom,
+    };
+  }, [voiceSession, voiceSessionRoom, token, user, profile, serverUrl]);
+  const renderedVoiceSessionKey = renderedVoiceSession
+    ? voiceSessionKey(renderedVoiceSession.serverUrl, renderedVoiceSession.room.id)
+    : "";
+  const showVoiceSessionFullscreen = Boolean(
+    voiceSessionRoom
+    && renderedVoiceSession
+    && renderedVoiceSession.serverUrl === serverUrl
+    && activeRoom?.id === voiceSessionRoom.id
+    && activeRoom?.type === "voice"
+    && voiceSessionRoom.type === "voice"
+  );
   const mentionableUsernames = useMemo(() => {
     const set = new Set<string>();
     for (const serverUser of serverUsers) {
@@ -1591,11 +1841,15 @@ export default function Home() {
           serverName={serverInfo?.name || "Server"}
           serverProfiles={servers}
           activeServerUrl={serverUrl}
+          homeServerUrl={homeServerUrl}
+          onSetHomeServer={setHomeServer}
           onSwitchServer={switchServer}
           onAddServer={switchServer}
           onRemoveServer={removeServer}
           onSignOutServer={signOutServer}
           serverHasTokenByUrl={serverHasTokenByUrl}
+          serverSessionStateByUrl={serverSessionStateByUrl}
+          serverDirectoryByUrl={serverDirectoryByUrl}
           serverUnreadByUrl={serverUnreadByUrl}
           isServerConnected={isConnected}
           isServerReconnecting={isReconnecting}
@@ -1606,6 +1860,7 @@ export default function Home() {
           onVoiceParticipantContextMenu={handleVoiceParticipantContextMenu}
           onStartGroupDM={handleStartGroupDMPicker}
           activeDmCallRoomId={dmVoiceRoomId}
+          onRequestServerLogin={openServerLoginPrompt}
         />
 
         {/* Main content area */}
@@ -1675,26 +1930,46 @@ export default function Home() {
             {/* Voice channel — kept mounted to maintain audio connection.
                 Shown fullscreen when the voice channel is active, compact when
                 viewing the DM that has an active voice call, hidden otherwise. */}
-            {voiceSessionRoom && (
+            {voiceSessionRoom && renderedVoiceSession && (
               <div
                 className={`flex flex-col min-w-0 overflow-hidden ${
-                  activeRoom?.id === voiceSessionRoom.id && activeRoom?.type === "voice"
-                    ? "flex-1 min-h-0"
-                    : activeRoom?.id === voiceSessionRoom.id && activeRoom?.type === "dm"
-                    ? "voice-call-mini"
-                    : "hidden"
+                  showVoiceSessionFullscreen ? "flex-1 min-h-0" : "voice-call-mini"
                 }`}
               >
                 <VoiceChannel
-                  key={voiceSessionRoom.id}
-                  room={voiceSessionRoom}
-                  onParticipantsChange={handleParticipantsChange}
-                  autoJoin={pendingAutoJoinVoiceRoomId === voiceSessionRoom.id}
-                  onVoiceControlsChange={handleVoiceControlsChange}
-                  currentUserId={user?.id ?? null}
-                  currentParticipants={voiceParticipants[voiceSessionRoom.id] ?? []}
+                  key={renderedVoiceSessionKey}
+                  room={renderedVoiceSession.room}
+                  serverUrl={renderedVoiceSession.serverUrl}
+                  livekitUrl={renderedVoiceSession.livekitUrl}
+                  authToken={renderedVoiceSession.authToken}
+                  authUser={renderedVoiceSession.authUser}
+                  authProfile={renderedVoiceSession.authProfile}
+                  onParticipantsChange={(roomId, participants) =>
+                    handleParticipantsChange(
+                      voiceSessionKey(renderedVoiceSession.serverUrl, roomId),
+                      participants
+                    )
+                  }
+                  autoJoin={pendingAutoJoinVoiceRoomId === renderedVoiceSession.room.id}
+                  onVoiceControlsChange={(roomId, controls) =>
+                    handleVoiceControlsChange(
+                      { ...renderedVoiceSession, room: { ...renderedVoiceSession.room, id: roomId } },
+                      voiceSessionKey(renderedVoiceSession.serverUrl, roomId),
+                      controls
+                    )
+                  }
+                  currentUserId={renderedVoiceSession.authUser.id}
+                  currentParticipants={
+                    voiceParticipants[voiceSessionKey(
+                      renderedVoiceSession.serverUrl,
+                      renderedVoiceSession.room.id
+                    )]
+                    ?? voiceParticipants[renderedVoiceSession.room.id]
+                    ?? []
+                  }
                   remoteControlSession={
-                    remoteControlSession?.roomId === voiceSessionRoom.id
+                    renderedVoiceSession.serverUrl === serverUrl
+                    && remoteControlSession?.roomId === renderedVoiceSession.room.id
                       ? remoteControlSession
                       : null
                   }
@@ -1826,6 +2101,129 @@ export default function Home() {
           }
         />
       )}
+      {serverLoginPromptUrl && (() => {
+        const serverInfoEntry = serverDirectoryByUrl[serverLoginPromptUrl];
+        const promptServerName =
+          serverInfoEntry?.name?.trim()
+          || servers.find((entry) => entry.url === serverLoginPromptUrl)?.name
+          || serverLoginPromptUrl;
+        return (
+          <div className="public-profile-backdrop" onClick={closeServerLoginPrompt}>
+            <div
+              className="public-profile-modal server-login-modal"
+              style={{ maxWidth: 420 }}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="public-profile-header server-login-modal-header">
+                <div className="server-login-modal-server">
+                  {serverInfoEntry?.iconUrl ? (
+                    <img src={serverInfoEntry.iconUrl} alt="" className="server-login-modal-icon" />
+                  ) : (
+                    <span className="server-login-modal-fallback">
+                      {promptServerName.trim().charAt(0).toUpperCase() || "S"}
+                    </span>
+                  )}
+                  <div>
+                    <h2>Sign in required</h2>
+                    <p className="server-login-modal-subtitle">{promptServerName}</p>
+                  </div>
+                </div>
+              </div>
+              <div className="public-profile-body server-login-modal-body">
+                <p style={{ margin: 0, color: "var(--text-secondary)" }}>
+                  {serverLoginChallengeToken
+                    ? "Enter your authentication code to restore this saved server session."
+                    : "This server needs your credentials again. Signing in here will restore access without interrupting other connected servers."}
+                </p>
+                {!serverLoginChallengeToken && (
+                  <>
+                    <label className="server-login-modal-field">
+                      <span>Email</span>
+                      <input
+                        type="email"
+                        value={serverLoginEmail}
+                        onChange={(event) => setServerLoginEmail(event.target.value)}
+                        className="server-login-modal-input"
+                        autoComplete="username"
+                        placeholder="you@example.com"
+                      />
+                    </label>
+                    <label className="server-login-modal-field">
+                      <span>Password</span>
+                      <input
+                        type="password"
+                        value={serverLoginPassword}
+                        onChange={(event) => setServerLoginPassword(event.target.value)}
+                        className="server-login-modal-input"
+                        autoComplete="current-password"
+                        placeholder="Password"
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            void submitServerLoginPrompt();
+                          }
+                        }}
+                      />
+                    </label>
+                  </>
+                )}
+                {serverLoginChallengeToken && (
+                  <label className="server-login-modal-field">
+                    <span>Authentication code</span>
+                    <input
+                      type="text"
+                      value={serverLoginCode}
+                      onChange={(event) => setServerLoginCode(event.target.value)}
+                      className="server-login-modal-input"
+                      autoComplete="one-time-code"
+                      inputMode="numeric"
+                      placeholder="123456"
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          void submitServerLoginPrompt();
+                        }
+                      }}
+                    />
+                  </label>
+                )}
+                {serverLoginError && (
+                  <p className="server-login-modal-error">{serverLoginError}</p>
+                )}
+                <div className="server-login-modal-actions">
+                  <button
+                    type="button"
+                    className="profile-button secondary"
+                    onClick={closeServerLoginPrompt}
+                    disabled={serverLoginSubmitting}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="profile-button"
+                    onClick={() => {
+                      void submitServerLoginPrompt();
+                    }}
+                    disabled={
+                      serverLoginSubmitting ||
+                      (!serverLoginChallengeToken
+                        ? !serverLoginEmail.trim() || !serverLoginPassword
+                        : !serverLoginCode.trim())
+                    }
+                  >
+                    {serverLoginSubmitting
+                      ? "Signing in..."
+                      : serverLoginChallengeToken
+                      ? "Verify"
+                      : "Sign in"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
       {remoteControlRequest && (
         <div className="public-profile-backdrop">
           <div className="public-profile-modal" style={{ maxWidth: 460 }}>
@@ -1927,7 +2325,7 @@ export default function Home() {
                 <input
                   type="range"
                   min={0}
-                  max={100}
+                  max={200}
                   step={1}
                   className="voice-ctx-volume-slider"
                   value={Math.round(vol * 100)}

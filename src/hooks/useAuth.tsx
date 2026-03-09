@@ -14,7 +14,7 @@ import {
 } from "../lib/api";
 import { resetSocket } from "../lib/socket";
 
-interface UserInfo {
+export interface UserInfo {
   id: string;
   email: string;
   isAdmin: boolean;
@@ -34,7 +34,7 @@ interface UserInfo {
   };
 }
 
-interface Profile {
+export interface Profile {
   username: string;
   status: "online" | "offline" | "away" | "dnd";
   avatarUrl: string;
@@ -63,6 +63,10 @@ interface AuthContext {
   serverUrl: string;
   setServerUrl: (url: string, nameHint?: string) => void;
   servers: SavedServer[];
+  homeServerUrl: string;
+  setHomeServer: (url: string) => void;
+  serverSessionStateByUrl: Record<string, SavedServerSessionState>;
+  serverDirectoryByUrl: Record<string, SavedServerDirectoryEntry>;
   switchServer: (url: string) => void;
   saveServer: (url: string, nameHint?: string) => void;
   removeServer: (url: string) => void;
@@ -72,7 +76,17 @@ interface AuthContext {
     email: string,
     password: string
   ) => Promise<{ error: string | null; requiresTwoFactor?: boolean; challengeToken?: string }>;
+  signInToSavedServerWithPassword: (
+    serverUrl: string,
+    email: string,
+    password: string
+  ) => Promise<{ error: string | null; requiresTwoFactor?: boolean; challengeToken?: string }>;
   signInWithTwoFactor: (
+    challengeToken: string,
+    code: string
+  ) => Promise<{ error: string | null }>;
+  signInToSavedServerWithTwoFactor: (
+    serverUrl: string,
     challengeToken: string,
     code: string
   ) => Promise<{ error: string | null }>;
@@ -101,7 +115,7 @@ const DEFAULT_PROFILE: Profile = {
   pushToTalkEnabled: false,
   pushToMuteEnabled: false,
   pushToTalkKey: "Space",
-  audioInputSensitivity: 0.02,
+  audioInputSensitivity: 0.06,
   noiseSuppressionMode: "standard",
   audioInputId: "",
   audioOutputId: "",
@@ -117,8 +131,22 @@ export interface SavedServer {
   lastUsedAt: string;
 }
 
+export type SavedServerSessionState =
+  | "ready"
+  | "checking"
+  | "login_required"
+  | "unreachable";
+
+export interface SavedServerDirectoryEntry {
+  name?: string;
+  description?: string;
+  iconUrl?: string;
+  reachable: boolean;
+}
+
 const SERVERS_STORAGE_KEY = "chitchat_servers";
 const TOKENS_BY_SERVER_STORAGE_KEY = "chitchat_tokens_by_server";
+const HOME_SERVER_STORAGE_KEY = "chitchat_home_server_url";
 
 const AuthContext = createContext<AuthContext | null>(null);
 
@@ -157,7 +185,7 @@ function mapServerProfile(data: Record<string, any>): Profile {
     audioInputSensitivity:
       typeof data.audio_input_sensitivity === "number"
         ? Math.min(Math.max(data.audio_input_sensitivity, 0), 1)
-        : 0.02,
+        : 0.06,
     noiseSuppressionMode:
       data.noise_suppression_mode === "off" ||
       data.noise_suppression_mode === "aggressive" ||
@@ -211,6 +239,19 @@ function writeSavedServers(servers: SavedServer[]) {
   localStorage.setItem(SERVERS_STORAGE_KEY, JSON.stringify(servers));
 }
 
+function readHomeServerUrl() {
+  return normalizeServerUrl(localStorage.getItem(HOME_SERVER_STORAGE_KEY) || "");
+}
+
+function writeHomeServerUrl(url: string) {
+  const normalized = normalizeServerUrl(url);
+  if (!normalized) {
+    localStorage.removeItem(HOME_SERVER_STORAGE_KEY);
+    return;
+  }
+  localStorage.setItem(HOME_SERVER_STORAGE_KEY, normalized);
+}
+
 function readTokensByServer(activeServerUrl: string): Record<string, string> {
   try {
     const raw = localStorage.getItem(TOKENS_BY_SERVER_STORAGE_KEY);
@@ -240,21 +281,87 @@ function writeTokensByServer(tokensByServer: Record<string, string>) {
   );
 }
 
-export function AuthProvider({ children }: { children: ReactNode }) {
-  const initialServerUrl = normalizeServerUrl(getServerUrl());
-  const [servers, setServers] = useState<SavedServer[]>(() =>
-    readSavedServers()
+function choosePreferredServerUrl(params: {
+  storedServerUrl: string;
+  homeServerUrl: string;
+  servers: SavedServer[];
+  tokensByServer: Record<string, string>;
+}) {
+  const savedUrls = new Set(params.servers.map((entry) => entry.url));
+  const hasSavedServer = (url: string) => savedUrls.has(url);
+  const hasSavedToken = (url: string) => Boolean(params.tokensByServer[url]);
+
+  if (
+    params.homeServerUrl &&
+    (hasSavedToken(params.homeServerUrl) || hasSavedServer(params.homeServerUrl))
+  ) {
+    return params.homeServerUrl;
+  }
+
+  if (
+    params.storedServerUrl &&
+    (hasSavedToken(params.storedServerUrl) || hasSavedServer(params.storedServerUrl))
+  ) {
+    return params.storedServerUrl;
+  }
+
+  const firstAuthenticatedServer = params.servers.find((entry) =>
+    hasSavedToken(entry.url)
   );
-  const [tokensByServer, setTokensByServer] = useState<Record<string, string>>(() =>
-    readTokensByServer(initialServerUrl)
+  if (firstAuthenticatedServer) {
+    return firstAuthenticatedServer.url;
+  }
+
+  return params.servers[0]?.url || params.storedServerUrl || params.homeServerUrl || "";
+}
+
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const storedServerUrl = normalizeServerUrl(getServerUrl());
+  const initialServers = readSavedServers();
+  const initialTokensByServer = readTokensByServer(storedServerUrl);
+  const storedHomeServerUrl = readHomeServerUrl();
+  const preferredInitialServerUrl = choosePreferredServerUrl({
+    storedServerUrl,
+    homeServerUrl: storedHomeServerUrl,
+    servers: initialServers,
+    tokensByServer: initialTokensByServer,
+  });
+
+  const [servers, setServers] = useState<SavedServer[]>(() => initialServers);
+  const [tokensByServer, setTokensByServer] = useState<Record<string, string>>(
+    () => initialTokensByServer
+  );
+  const [homeServerUrl, setHomeServerUrlState] = useState<string>(
+    () => storedHomeServerUrl || preferredInitialServerUrl
   );
   const [token, setTokenState] = useState<string | null>(
-    () => tokensByServer[initialServerUrl] || null
+    () => initialTokensByServer[preferredInitialServerUrl] || null
   );
   const [user, setUser] = useState<UserInfo | null>(null);
   const [profile, setProfile] = useState<Profile>(DEFAULT_PROFILE);
   const [loading, setLoading] = useState(true);
-  const [serverUrl, setServerUrlState] = useState(initialServerUrl);
+  const [serverUrl, setServerUrlState] = useState(preferredInitialServerUrl);
+  const [serverSessionStateByUrl, setServerSessionStateByUrl] = useState<
+    Record<string, SavedServerSessionState>
+  >(() => {
+    const next: Record<string, SavedServerSessionState> = {};
+    for (const server of initialServers) {
+      next[server.url] = initialTokensByServer[server.url]
+        ? "checking"
+        : "login_required";
+    }
+    return next;
+  });
+  const [serverDirectoryByUrl, setServerDirectoryByUrl] = useState<
+    Record<string, SavedServerDirectoryEntry>
+  >({});
+
+  useEffect(() => {
+    if (serverUrl) {
+      _setServerUrl(serverUrl);
+    }
+    setToken(token);
+  }, [serverUrl, token]);
 
   useEffect(() => {
     if (servers.length > 0) return;
@@ -271,11 +378,112 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [servers.length, tokensByServer]);
 
   useEffect(() => {
+    if (homeServerUrl) {
+      writeHomeServerUrl(homeServerUrl);
+      return;
+    }
+    const fallbackHome =
+      choosePreferredServerUrl({
+        storedServerUrl: serverUrl,
+        homeServerUrl: "",
+        servers,
+        tokensByServer,
+      }) || "";
+    if (!fallbackHome) {
+      writeHomeServerUrl("");
+      return;
+    }
+    setHomeServerUrlState(fallbackHome);
+  }, [homeServerUrl, serverUrl, servers, tokensByServer]);
+
+  useEffect(() => {
+    let disposed = false;
+    const controllers = new Map<string, AbortController>();
+
+    async function loadServerDirectoryEntry(url: string) {
+      const controller = new AbortController();
+      controllers.set(url, controller);
+      try {
+        const res = await fetch(`${url}/api/server/info`, {
+          signal: controller.signal,
+        });
+        if (disposed) return;
+        if (!res.ok) {
+          setServerDirectoryByUrl((prev) => ({
+            ...prev,
+            [url]: {
+              ...(prev[url] || {}),
+              reachable: false,
+            },
+          }));
+          return;
+        }
+        const data = (await res.json()) as {
+          name?: string;
+          description?: string;
+          iconUrl?: string;
+        };
+        setServerDirectoryByUrl((prev) => ({
+          ...prev,
+          [url]: {
+            name: data.name || prev[url]?.name || hostFromUrl(url),
+            description: data.description || "",
+            iconUrl: data.iconUrl || "",
+            reachable: true,
+          },
+        }));
+        if (data.name?.trim()) {
+          setServers((prev) => {
+            let changed = false;
+            const next = prev.map((entry) => {
+              if (entry.url !== url || entry.name === data.name) return entry;
+              changed = true;
+              return { ...entry, name: data.name! };
+            });
+            if (changed) writeSavedServers(next);
+            return changed ? next : prev;
+          });
+        }
+      } catch {
+        if (disposed) return;
+        setServerDirectoryByUrl((prev) => ({
+          ...prev,
+          [url]: {
+            ...(prev[url] || {}),
+            reachable: false,
+          },
+        }));
+      } finally {
+        controllers.delete(url);
+      }
+    }
+
+    for (const server of servers) {
+      void loadServerDirectoryEntry(server.url);
+    }
+
+    return () => {
+      disposed = true;
+      for (const controller of controllers.values()) {
+        controller.abort();
+      }
+      controllers.clear();
+    };
+  }, [servers]);
+
+  useEffect(() => {
     if (token) return;
-    const fallback = servers.find((entry) => Boolean(tokensByServer[entry.url]));
+    const preferredUrl = choosePreferredServerUrl({
+      storedServerUrl: serverUrl,
+      homeServerUrl,
+      servers,
+      tokensByServer,
+    });
+    const fallback = servers.find((entry) => entry.url === preferredUrl)
+      || servers.find((entry) => Boolean(tokensByServer[entry.url]));
     if (!fallback || fallback.url === serverUrl) return;
     switchToServer(fallback.url, fallback.name);
-  }, [token, servers, tokensByServer, serverUrl]);
+  }, [token, servers, tokensByServer, serverUrl, homeServerUrl]);
 
   function upsertServer(url: string, nameHint?: string) {
     const normalized = normalizeServerUrl(url);
@@ -301,6 +509,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   function setTokens(next: Record<string, string>) {
     setTokensByServer(next);
     writeTokensByServer(next);
+  }
+
+  function setHomeServer(url: string) {
+    const normalized = normalizeServerUrl(url);
+    if (!normalized) return;
+    setHomeServerUrlState(normalized);
+    upsertServer(normalized);
   }
 
   function switchToServer(url: string, nameHint?: string, persist = true) {
@@ -351,6 +566,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           permissions: mapPermissions(data),
         });
         setProfile(mapServerProfile(data));
+        setServerSessionStateByUrl((prev) => ({
+          ...prev,
+          [serverUrl]: "ready",
+        }));
       })
       .catch(() => {
         const nextTokens = { ...tokensByServer };
@@ -360,12 +579,78 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setTokenState(null);
         setUser(null);
         setProfile(DEFAULT_PROFILE);
+        setServerSessionStateByUrl((prev) => ({
+          ...prev,
+          [serverUrl]: "login_required",
+        }));
       })
       .finally(() => {
         clearTimeout(timeout);
         setLoading(false);
       });
   }, [serverUrl, token, tokensByServer]);
+
+  useEffect(() => {
+    const nextBaseState: Record<string, SavedServerSessionState> = {};
+    for (const server of servers) {
+      nextBaseState[server.url] = tokensByServer[server.url]
+        ? serverSessionStateByUrl[server.url] === "ready"
+          ? "ready"
+          : "checking"
+        : "login_required";
+    }
+    setServerSessionStateByUrl(nextBaseState);
+
+    const controllers = new Map<string, AbortController>();
+    let disposed = false;
+
+    async function validateServerSession(url: string, authToken: string) {
+      const controller = new AbortController();
+      controllers.set(url, controller);
+      const timeout = window.setTimeout(() => controller.abort(), 8000);
+      try {
+        const res = await fetch(`${url}/api/auth/me`, {
+          signal: controller.signal,
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+          },
+        });
+        if (disposed) return;
+        setServerSessionStateByUrl((prev) => ({
+          ...prev,
+          [url]:
+            res.ok
+              ? "ready"
+              : res.status === 401 || res.status === 403
+              ? "login_required"
+              : "unreachable",
+        }));
+      } catch {
+        if (disposed) return;
+        setServerSessionStateByUrl((prev) => ({
+          ...prev,
+          [url]: "unreachable",
+        }));
+      } finally {
+        window.clearTimeout(timeout);
+        controllers.delete(url);
+      }
+    }
+
+    for (const server of servers) {
+      const authToken = tokensByServer[server.url];
+      if (!authToken) continue;
+      void validateServerSession(server.url, authToken);
+    }
+
+    return () => {
+      disposed = true;
+      for (const controller of controllers.values()) {
+        controller.abort();
+      }
+      controllers.clear();
+    };
+  }, [servers, tokensByServer]);
 
   async function signInWithPassword(email: string, password: string) {
     try {
@@ -636,6 +921,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         resetSocket();
       }
     }
+    if (homeServerUrl === normalized) {
+      const nextHome = fallbackServerUrl || "";
+      setHomeServerUrlState(nextHome);
+      writeHomeServerUrl(nextHome);
+    }
   }
 
   function signOutServer(url: string) {
@@ -655,11 +945,123 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setLoading(false);
       resetSocket();
     }
+    if (homeServerUrl === normalized) {
+      const fallbackHome =
+        servers.find((entry) => entry.url !== normalized && Boolean(nextTokens[entry.url]))?.url ||
+        servers.find((entry) => entry.url !== normalized)?.url ||
+        "";
+      setHomeServerUrlState(fallbackHome);
+      writeHomeServerUrl(fallbackHome);
+    }
   }
 
   function getServerToken(url: string): string | null {
     const normalized = normalizeServerUrl(url);
     return tokensByServer[normalized] || null;
+  }
+
+  async function buildClientVersionHeaders() {
+    const versionHeaders: Record<string, string> = {};
+    if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
+      try {
+        const { getVersion } = await import("@tauri-apps/api/app");
+        versionHeaders["X-Client-Version"] = await getVersion();
+      } catch {
+        // Not fatal — version header is optional
+      }
+    }
+    return versionHeaders;
+  }
+
+  async function loginToSavedServerWithPassword(
+    targetServerUrl: string,
+    email: string,
+    password: string
+  ) {
+    const normalizedServerUrl = normalizeServerUrl(targetServerUrl);
+    if (!normalizedServerUrl) {
+      return { error: "Server address is required" };
+    }
+    try {
+      const versionHeaders = await buildClientVersionHeaders();
+      const res = await fetch(`${normalizedServerUrl}/api/auth/login`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...versionHeaders,
+        },
+        body: JSON.stringify({ email, password }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        return { error: data.error || "Login failed" };
+      }
+      if (data.requiresTwoFactor && data.challengeToken) {
+        return {
+          error: null,
+          requiresTwoFactor: true,
+          challengeToken: data.challengeToken,
+        };
+      }
+
+      const nextTokens = { ...tokensByServer, [normalizedServerUrl]: data.token };
+      setTokens(nextTokens);
+      upsertServer(
+        normalizedServerUrl,
+        serverDirectoryByUrl[normalizedServerUrl]?.name || hostFromUrl(normalizedServerUrl)
+      );
+      setServerSessionStateByUrl((prev) => ({
+        ...prev,
+        [normalizedServerUrl]: "ready",
+      }));
+      return { error: null };
+    } catch (err) {
+      return {
+        error: err instanceof Error ? err.message : "Connection failed",
+      };
+    }
+  }
+
+  async function loginToSavedServerWithTwoFactor(
+    targetServerUrl: string,
+    challengeToken: string,
+    code: string
+  ) {
+    const normalizedServerUrl = normalizeServerUrl(targetServerUrl);
+    if (!normalizedServerUrl) {
+      return { error: "Server address is required" };
+    }
+    try {
+      const versionHeaders = await buildClientVersionHeaders();
+      const res = await fetch(`${normalizedServerUrl}/api/auth/login/2fa`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...versionHeaders,
+        },
+        body: JSON.stringify({ challengeToken, code }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        return { error: data.error || "2FA verification failed" };
+      }
+
+      const nextTokens = { ...tokensByServer, [normalizedServerUrl]: data.token };
+      setTokens(nextTokens);
+      upsertServer(
+        normalizedServerUrl,
+        serverDirectoryByUrl[normalizedServerUrl]?.name || hostFromUrl(normalizedServerUrl)
+      );
+      setServerSessionStateByUrl((prev) => ({
+        ...prev,
+        [normalizedServerUrl]: "ready",
+      }));
+      return { error: null };
+    } catch (err) {
+      return {
+        error: err instanceof Error ? err.message : "Connection failed",
+      };
+    }
   }
 
   return (
@@ -672,6 +1074,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         loading,
         serverUrl,
         servers,
+        homeServerUrl,
+        setHomeServer,
+        serverSessionStateByUrl,
+        serverDirectoryByUrl,
         setServerUrl: handleSetServerUrl,
         switchServer: switchToServer,
         saveServer,
@@ -679,7 +1085,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         signOutServer,
         getServerToken,
         signInWithPassword,
+        signInToSavedServerWithPassword: loginToSavedServerWithPassword,
         signInWithTwoFactor,
+        signInToSavedServerWithTwoFactor: loginToSavedServerWithTwoFactor,
         signUp,
         requestPasswordReset,
         confirmPasswordReset,

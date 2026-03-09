@@ -434,6 +434,16 @@ export default function ChatRoom({
     }
   }, [messages]);
 
+  useEffect(() => {
+    if (!unreadCount || messages.length === 0 || !chatBodyRef.current) return;
+    const frame = window.requestAnimationFrame(() => {
+      if (chatBodyRef.current && isAtBottom(chatBodyRef.current)) {
+        onMarkRead?.(room.id);
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [messages, unreadCount, room.id, onMarkRead]);
+
   // Join room and listen for messages
   useEffect(() => {
     if (!isConnected) return;
@@ -441,6 +451,7 @@ export default function ChatRoom({
     socket.emit("room:join", room.id);
 
     function onMessage(message: Message) {
+      if (message.room_id !== room.id) return;
       shouldScrollRef.current = true;
       setMessages((prev) => {
         if (message.client_nonce) {

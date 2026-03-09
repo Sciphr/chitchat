@@ -1,6 +1,10 @@
 import { useState, useEffect, useRef, useCallback, useLayoutEffect } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import type { Room, RoomCategory, VoiceControls } from "../../types";
+import type { Room, RoomCategory, ScreenShareSource, VoiceControls } from "../../types";
+import type {
+  SavedServerDirectoryEntry,
+  SavedServerSessionState,
+} from "../../hooks/useAuth";
 import {
   Mic,
   MicOff,
@@ -58,11 +62,15 @@ interface SidebarProps {
   serverName: string;
   serverProfiles: Array<{ url: string; name: string }>;
   activeServerUrl: string;
+  homeServerUrl: string;
+  onSetHomeServer: (url: string) => void;
   onSwitchServer: (url: string) => void;
   onAddServer: (url: string) => void;
   onRemoveServer: (url: string) => void;
   onSignOutServer: (url: string) => void;
   serverHasTokenByUrl: Record<string, boolean>;
+  serverSessionStateByUrl: Record<string, SavedServerSessionState>;
+  serverDirectoryByUrl: Record<string, SavedServerDirectoryEntry>;
   serverUnreadByUrl: Record<string, number>;
   isServerConnected: boolean;
   isServerReconnecting: boolean;
@@ -73,7 +81,13 @@ interface SidebarProps {
   onVoiceParticipantContextMenu?: (participantId: string, x: number, y: number) => void;
   onStartGroupDM?: (room: Room) => void;
   activeDmCallRoomId?: string | null;
+  onRequestServerLogin: (url: string) => void;
 }
+
+type DeviceOption = {
+  deviceId: string;
+  label: string;
+};
 
 export default function Sidebar({
   rooms,
@@ -103,11 +117,15 @@ export default function Sidebar({
   serverName,
   serverProfiles,
   activeServerUrl,
+  homeServerUrl,
+  onSetHomeServer,
   onSwitchServer,
   onAddServer,
   onRemoveServer,
   onSignOutServer,
   serverHasTokenByUrl,
+  serverSessionStateByUrl,
+  serverDirectoryByUrl,
   serverUnreadByUrl,
   isServerConnected,
   isServerReconnecting,
@@ -118,6 +136,7 @@ export default function Sidebar({
   onVoiceParticipantContextMenu,
   onStartGroupDM,
   activeDmCallRoomId,
+  onRequestServerLogin,
 }: SidebarProps) {
   type SidebarContextMenu = {
     x: number;
@@ -153,11 +172,15 @@ export default function Sidebar({
   const [addServerError, setAddServerError] = useState("");
   const [collapsedCategories, setCollapsedCategories] = useState<Record<string, boolean>>({});
   const [expandingCategories, setExpandingCategories] = useState<Record<string, boolean>>({});
-  const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([]);
-  const [audioOutputs, setAudioOutputs] = useState<MediaDeviceInfo[]>([]);
+  const [audioInputs, setAudioInputs] = useState<DeviceOption[]>([]);
+  const [audioOutputs, setAudioOutputs] = useState<DeviceOption[]>([]);
   const [devicePickerError, setDevicePickerError] = useState<string | null>(null);
   const [shareRes, setShareRes] = useState("1080p");
   const [shareFps, setShareFps] = useState(30);
+  const [shareSourceKey, setShareSourceKey] = useState("");
+  const [shareSources, setShareSources] = useState<ScreenShareSource[]>([]);
+  const [shareSourcesLoading, setShareSourcesLoading] = useState(false);
+  const [sharePickerError, setSharePickerError] = useState<string | null>(null);
   const sharePickerRef = useRef<HTMLDivElement>(null);
   const [pickerLimits, setPickerLimits] = useState<{
     maxScreenShareResolution: string;
@@ -365,6 +388,18 @@ export default function Sidebar({
     if (!voiceControls) return;
     let cancelled = false;
 
+    function mapBrowserDevices(
+      devices: MediaDeviceInfo[],
+      kind: "audioinput" | "audiooutput"
+    ): DeviceOption[] {
+      return devices
+        .filter((device) => device.kind === kind)
+        .map((device) => ({
+          deviceId: device.deviceId,
+          label: device.label,
+        }));
+    }
+
     async function primeMediaPermissions() {
       if (!navigator.mediaDevices?.getUserMedia) return;
       try {
@@ -379,20 +414,41 @@ export default function Sidebar({
     }
 
     async function loadDevices() {
-      if (!navigator.mediaDevices?.enumerateDevices) return;
       try {
-        let devices = await navigator.mediaDevices.enumerateDevices();
-        let audioIn = devices.filter((d) => d.kind === "audioinput");
-        let audioOut = devices.filter((d) => d.kind === "audiooutput");
+        let audioIn: DeviceOption[] = [];
+        let audioOut: DeviceOption[] = [];
+        const nativeInputLoader = voiceControls?.listAudioInputDevices;
 
-        if (
-          (audioIn.length <= 1 || audioOut.length <= 1) &&
-          typeof navigator.mediaDevices?.getUserMedia === "function"
-        ) {
-          await primeMediaPermissions();
-          devices = await navigator.mediaDevices.enumerateDevices();
-          audioIn = devices.filter((d) => d.kind === "audioinput");
-          audioOut = devices.filter((d) => d.kind === "audiooutput");
+        if (nativeInputLoader) {
+          audioIn = (await nativeInputLoader()).map((device) => ({
+            deviceId: device.id,
+            label: device.label,
+          }));
+        } else if (navigator.mediaDevices?.enumerateDevices) {
+          let devices = await navigator.mediaDevices.enumerateDevices();
+          audioIn = mapBrowserDevices(devices, "audioinput");
+
+          if (
+            audioIn.length <= 1 &&
+            typeof navigator.mediaDevices?.getUserMedia === "function"
+          ) {
+            await primeMediaPermissions();
+            devices = await navigator.mediaDevices.enumerateDevices();
+            audioIn = mapBrowserDevices(devices, "audioinput");
+          }
+        }
+
+        if (navigator.mediaDevices?.enumerateDevices) {
+          let devices = await navigator.mediaDevices.enumerateDevices();
+          audioOut = mapBrowserDevices(devices, "audiooutput");
+          if (
+            audioOut.length <= 1 &&
+            typeof navigator.mediaDevices?.getUserMedia === "function"
+          ) {
+            await primeMediaPermissions();
+            devices = await navigator.mediaDevices.enumerateDevices();
+            audioOut = mapBrowserDevices(devices, "audiooutput");
+          }
         }
 
         if (cancelled) return;
@@ -415,12 +471,16 @@ export default function Sidebar({
     function onDeviceChange() {
       void loadDevices();
     }
-    navigator.mediaDevices?.addEventListener?.("devicechange", onDeviceChange);
+    if (!voiceControls?.listAudioInputDevices) {
+      navigator.mediaDevices?.addEventListener?.("devicechange", onDeviceChange);
+    }
     return () => {
       cancelled = true;
-      navigator.mediaDevices?.removeEventListener?.("devicechange", onDeviceChange);
+      if (!voiceControls?.listAudioInputDevices) {
+        navigator.mediaDevices?.removeEventListener?.("devicechange", onDeviceChange);
+      }
     };
-  }, [Boolean(voiceControls)]);
+  }, [Boolean(voiceControls), Boolean(voiceControls?.listAudioInputDevices)]);
 
   const statusMap: Record<string, { label: string; color: string }> = {
     online: { label: "Online", color: "var(--success)" },
@@ -647,6 +707,7 @@ export default function Sidebar({
 
   // Fetch fresh media limits from server and position the popover
   const openSharePicker = useCallback(async () => {
+    setSharePickerError(null);
     let nextLimits =
       voiceControls?.mediaLimits ?? {
         maxScreenShareResolution: "1080p",
@@ -686,11 +747,46 @@ export default function Sidebar({
     setShareRes(recommended.resolution);
     setShareFps(recommended.fps);
 
+    if (voiceControls?.listScreenShareSources) {
+      setShareSourcesLoading(true);
+      try {
+        const sources = await voiceControls.listScreenShareSources();
+        setShareSources(sources);
+        setShareSourceKey((prev) => {
+          if (prev && sources.some((source) => `${source.kind}:${source.id}` === prev)) {
+            return prev;
+          }
+          const defaultSource =
+            sources.find((source) => source.kind === "screen") ?? sources[0];
+          return defaultSource ? `${defaultSource.kind}:${defaultSource.id}` : "";
+        });
+        if (sources.length === 0) {
+          setSharePickerError("No native capture sources were found.");
+        }
+      } catch (err) {
+        setShareSources([]);
+        setShareSourceKey("");
+        setSharePickerError(
+          err instanceof Error ? err.message : "Failed to load share sources."
+        );
+      } finally {
+        setShareSourcesLoading(false);
+      }
+    } else {
+      setShareSources([]);
+      setShareSourceKey("");
+      setShareSourcesLoading(false);
+    }
+
     setShowSharePicker(true);
-  }, [voiceControls?.mediaLimits]);
+  }, [voiceControls]);
 
   // Use freshly-fetched limits when available, otherwise fall back to token-time limits
   const activeLimits = pickerLimits || voiceControls?.mediaLimits;
+  const selectedShareSource =
+    shareSourceKey && shareSources.length > 0
+      ? shareSources.find((source) => `${source.kind}:${source.id}` === shareSourceKey) ?? null
+      : null;
 
   function getSafeCreateCategoryId(requested?: string) {
     const fallback = orderedCategories[0]?.id || "default";
@@ -864,7 +960,7 @@ export default function Sidebar({
     );
   }
 
-  function labelDevice(device: MediaDeviceInfo, index: number, prefix: string) {
+  function labelDevice(device: DeviceOption, index: number, prefix: string) {
     return device.label || `${prefix} ${index + 1}`;
   }
 
@@ -883,6 +979,19 @@ export default function Sidebar({
       return "S";
     }
   }
+
+  function describeServerSession(state: SavedServerSessionState, hasToken: boolean) {
+    if (!hasToken || state === "login_required") return "Login required";
+    if (state === "unreachable") return "Server unreachable";
+    if (state === "checking") return "Checking saved login";
+    return "Signed in";
+  }
+
+  const orderedServerProfiles = [...serverProfiles].sort((a, b) => {
+    if (a.url === homeServerUrl) return -1;
+    if (b.url === homeServerUrl) return 1;
+    return 0;
+  });
 
   const syncActiveRoomPill = useCallback(() => {
     const listEl = roomsListRef.current;
@@ -1002,15 +1111,33 @@ export default function Sidebar({
           });
         }}
       >
-        {serverProfiles.map((server) => {
+        {orderedServerProfiles.map((server) => {
           const isActive = server.url === activeServerUrl;
+          const isHome = server.url === homeServerUrl;
+          const hasSavedLogin = Boolean(serverHasTokenByUrl[server.url]);
+          const directoryEntry = serverDirectoryByUrl[server.url];
+          const sessionState = serverSessionStateByUrl[server.url]
+            ?? (hasSavedLogin ? "checking" : "login_required");
+          const needsAttention =
+            sessionState === "login_required" || sessionState === "unreachable";
           const unread = serverUnreadByUrl[server.url] ?? 0;
+          const showLoginPrompt = !hasSavedLogin || sessionState === "login_required";
+          const displayName =
+            directoryEntry?.name?.trim() || server.name || server.url;
           return (
             <button
               key={server.url}
               type="button"
-              className={`server-rail-item ${isActive ? "active" : ""}`}
-              onClick={() => onSwitchServer(server.url)}
+              className={`server-rail-item ${isActive ? "active" : ""} ${
+                needsAttention ? "attention" : ""
+              }`}
+              onClick={() => {
+                if (showLoginPrompt) {
+                  onRequestServerLogin(server.url);
+                  return;
+                }
+                onSwitchServer(server.url);
+              }}
               onContextMenu={(event) => {
                 event.preventDefault();
                 setContextMenu({
@@ -1020,12 +1147,34 @@ export default function Sidebar({
                   serverUrl: server.url,
                 });
               }}
-              title={server.name || server.url}
-              aria-label={server.name || server.url}
+              title={`${displayName}${
+                isHome ? " • Home server" : ""
+              } • ${describeServerSession(sessionState, hasSavedLogin)}`}
+              aria-label={displayName}
             >
-              <span className="server-rail-item-label">
-                {getServerInitial(server.name || "", server.url)}
-              </span>
+              {isHome && <span className="server-rail-home-indicator" aria-hidden="true" />}
+              {directoryEntry?.iconUrl ? (
+                <img
+                  src={directoryEntry.iconUrl}
+                  alt=""
+                  className="server-rail-item-icon"
+                  draggable={false}
+                />
+              ) : (
+                <span className="server-rail-item-label">
+                  {getServerInitial(displayName, server.url)}
+                </span>
+              )}
+              {needsAttention && (
+                <span
+                  className={`server-rail-status-badge ${
+                    sessionState === "unreachable" ? "offline" : "login"
+                  }`}
+                  aria-hidden="true"
+                >
+                  !
+                </span>
+              )}
               {unread > 0 && (
                 <span className="server-rail-badge">
                   {formatServerBadgeCount(unread)}
@@ -1263,6 +1412,20 @@ export default function Sidebar({
               Add server
             </button>
           )}
+          {contextMenu.scope === "server" &&
+            contextMenu.serverUrl &&
+            contextMenu.serverUrl !== homeServerUrl && (
+              <button
+                type="button"
+                className="sidebar-context-menu-item"
+                onClick={() => {
+                  onSetHomeServer(contextMenu.serverUrl!);
+                  setContextMenu(null);
+                }}
+              >
+                Set as home server
+              </button>
+            )}
           {contextMenu.scope === "server" &&
             contextMenu.serverUrl &&
             serverHasTokenByUrl[contextMenu.serverUrl] && (
@@ -1738,6 +1901,29 @@ export default function Sidebar({
                                 className={`sidebar-voice-participant ${
                                   participant.isSpeaking ? "speaking" : ""
                                 }`}
+                                role="button"
+                                tabIndex={0}
+                                title={participant.name}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  const rect = e.currentTarget.getBoundingClientRect();
+                                  onVoiceParticipantContextMenu?.(
+                                    participant.id,
+                                    Math.round(rect.left + rect.width / 2),
+                                    Math.round(rect.bottom + 4)
+                                  );
+                                }}
+                                onKeyDown={(e) => {
+                                  if (e.key !== "Enter" && e.key !== " ") return;
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  const rect = e.currentTarget.getBoundingClientRect();
+                                  onVoiceParticipantContextMenu?.(
+                                    participant.id,
+                                    Math.round(rect.left + rect.width / 2),
+                                    Math.round(rect.bottom + 4)
+                                  );
+                                }}
                                 onContextMenu={(e) => {
                                   e.preventDefault();
                                   e.stopPropagation();
@@ -1946,15 +2132,54 @@ export default function Sidebar({
                       </option>
                     ))}
                   </select>
+                  {voiceControls.listScreenShareSources && (
+                    <>
+                      <label className="share-picker-label">Source</label>
+                      <select
+                        className="share-picker-select"
+                        value={shareSourceKey}
+                        onChange={(e) => setShareSourceKey(e.target.value)}
+                        disabled={shareSourcesLoading || shareSources.length === 0}
+                      >
+                        {shareSources.map((source) => (
+                          <option
+                            key={`${source.kind}:${source.id}`}
+                            value={`${source.kind}:${source.id}`}
+                          >
+                            {source.kind === "screen" ? "Screen" : "Window"}: {source.title}
+                          </option>
+                        ))}
+                      </select>
+                    </>
+                  )}
+                  {sharePickerError && (
+                    <div className="voice-error" style={{ marginTop: 8 }}>
+                      {sharePickerError}
+                    </div>
+                  )}
                   <button
                     className="share-picker-start"
-                    disabled={!voiceControls.isConnected}
-                    onClick={() => {
+                    disabled={
+                      !voiceControls.isConnected ||
+                      shareSourcesLoading ||
+                      Boolean(voiceControls.listScreenShareSources && !selectedShareSource)
+                    }
+                    onClick={async () => {
                       setShowSharePicker(false);
-                      voiceControls.startScreenShare(shareRes, shareFps);
+                      try {
+                        await voiceControls.startScreenShare(
+                          shareRes,
+                          shareFps,
+                          selectedShareSource ?? undefined
+                        );
+                      } catch (err) {
+                        setSharePickerError(
+                          err instanceof Error ? err.message : "Failed to start screen share."
+                        );
+                      }
                     }}
                   >
-                    Start Sharing
+                    {shareSourcesLoading ? "Loading..." : "Start Sharing"}
                   </button>
                 </div>
               )}

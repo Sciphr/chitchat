@@ -3,6 +3,10 @@ import { useAuth } from "../hooks/useAuth";
 import { createLocalVideoTrack, type LocalVideoTrack } from "livekit-client";
 import { BackgroundProcessor, supportsBackgroundProcessors } from "@livekit/track-processors";
 import { apiFetch } from "../lib/api";
+import {
+  getDesktopNotificationPermission,
+  requestDesktopNotificationPermission as requestNativeDesktopNotificationPermission,
+} from "../lib/desktopNotifications";
 
 const THEMES = [
   { id: "midnight", label: "Midnight", accent: "#7c6aff", bg: "#0f0f17" },
@@ -87,12 +91,7 @@ export default function Settings({
   const [success, setSuccess] = useState("");
   const [notificationPermission, setNotificationPermission] = useState<
     NotificationPermission | "unsupported"
-  >(() => {
-    if (typeof window === "undefined" || !("Notification" in window)) {
-      return "unsupported";
-    }
-    return Notification.permission;
-  });
+  >("default");
   const [capturingKey, setCapturingKey] = useState(false);
   const [activeTheme, setActiveTheme] = useState(getTheme);
   const [activeTab, setActiveTab] = useState<"settings" | "public-profile">(
@@ -132,11 +131,7 @@ export default function Settings({
     STATUS_STYLES[profile.status] || STATUS_STYLES.online;
 
   useEffect(() => {
-    if (typeof window === "undefined" || !("Notification" in window)) {
-      setNotificationPermission("unsupported");
-      return;
-    }
-    setNotificationPermission(Notification.permission);
+    void getDesktopNotificationPermission().then(setNotificationPermission);
   }, []);
 
   useEffect(() => {
@@ -315,29 +310,24 @@ export default function Settings({
   async function requestDesktopNotificationPermission(): Promise<
     NotificationPermission | "unsupported"
   > {
-    if (typeof window === "undefined" || !("Notification" in window)) {
+    const permission = await requestNativeDesktopNotificationPermission();
+    setNotificationPermission(permission);
+    if (permission === "unsupported") {
       setError("Desktop notifications are not supported on this platform.");
       return "unsupported";
     }
-    try {
-      const permission = await Notification.requestPermission();
-      setNotificationPermission(permission);
-      if (permission !== "granted") {
-        setForm((prev) => ({ ...prev, desktopNotificationsEnabled: false }));
-        setError(
-          permission === "denied"
-            ? "Desktop notifications are blocked by your system/browser. Allow notifications for ChitChat and try again."
-            : "Desktop notification permission was not granted."
-        );
-      } else {
-        setError("");
-        setSuccess("Desktop notification permission granted.");
-      }
-      return permission;
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to request notification permission");
-      return "denied";
+    if (permission !== "granted") {
+      setForm((prev) => ({ ...prev, desktopNotificationsEnabled: false }));
+      setError(
+        permission === "denied"
+          ? "Desktop notifications are blocked by your system. Allow notifications for ChitChat and try again."
+          : "Desktop notification permission was not granted."
+      );
+    } else {
+      setError("");
+      setSuccess("Desktop notification permission granted.");
     }
+    return permission;
   }
 
   async function handleDesktopNotificationsToggle() {
@@ -1096,6 +1086,9 @@ export default function Settings({
                       }
                       className="voice-mix-slider"
                     />
+                    <div className="profile-help">
+                      Higher values require a louder voice before the mic opens. New profiles default to 6%.
+                    </div>
                   </div>
                   <div style={{ marginTop: 12 }}>
                     <label className="profile-label">Noise suppression</label>
@@ -1114,10 +1107,13 @@ export default function Settings({
                       }
                     >
                       <option value="off">Off</option>
-                      <option value="standard">Standard</option>
-                      <option value="aggressive">Aggressive</option>
-                      <option value="rnnoise">RNNoise (High)</option>
+                      <option value="standard">Balanced</option>
+                      <option value="aggressive">Focused Voice</option>
+                      <option value="rnnoise">RNNoise (Experimental)</option>
                     </select>
+                    <div className="profile-help">
+                      Balanced uses the browser voice stack. Focused Voice narrows the mic to mono. RNNoise is strongest, but can sound over-processed on some mics.
+                    </div>
                   </div>
                   <div style={{ marginTop: 12 }}>
                     <label className="profile-label">Video background</label>

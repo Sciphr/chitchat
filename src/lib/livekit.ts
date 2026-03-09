@@ -150,16 +150,20 @@ export async function fetchLiveKitToken(params: {
   room: string;
   userId: string;
   username: string;
+  purpose?: "voice" | "native_screenshare" | "native_voice";
+  serverUrl?: string;
+  authToken?: string | null;
 }): Promise<{ token: string; mediaLimits: MediaLimits }> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
-  const authToken = getToken();
+  const authToken = params.authToken ?? getToken();
   if (authToken) {
     headers["Authorization"] = `Bearer ${authToken}`;
   }
 
-  const res = await fetch(`${getServerUrl()}/api/livekit/token`, {
+  const targetServerUrl = params.serverUrl ?? getServerUrl();
+  const res = await fetch(`${targetServerUrl}/api/livekit/token`, {
     method: "POST",
     headers,
     body: JSON.stringify(params),

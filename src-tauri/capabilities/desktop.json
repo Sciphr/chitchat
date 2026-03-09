@@ -10,6 +10,7 @@
   ],
   "permissions": [
     "updater:default",
+    "notification:default",
     "dialog:default",
     "fs:default",
     "fs:allow-write-file"
