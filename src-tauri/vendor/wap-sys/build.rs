@@ -285,7 +285,8 @@ mod webrtc {
     fn bundled_work_dir() -> PathBuf {
         #[cfg(target_os = "windows")]
         {
-            let unique = out_dir()
+            let out = out_dir();
+            let unique = out
                 .file_name()
                 .and_then(|value| value.to_str())
                 .unwrap_or("wap");
