@@ -34,7 +34,7 @@ use tauri::{
     image::Image,
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Emitter, Manager, State,
+    Emitter, Manager, State, Wry,
 };
 use tokio::{sync::watch, task::JoinHandle};
 #[cfg(target_os = "windows")]
@@ -451,15 +451,15 @@ fn apply_desktop_unread_badge(app: &tauri::AppHandle, count: u32) {
 }
 
 struct DesktopTrayHandles {
-    open_home: MenuItem,
-    voice_mute: CheckMenuItem,
-    voice_deafen: CheckMenuItem,
-    voice_disconnect: MenuItem,
-    status_online: CheckMenuItem,
-    status_away: CheckMenuItem,
-    status_dnd: CheckMenuItem,
-    status_offline: CheckMenuItem,
-    check_updates: MenuItem,
+    open_home: MenuItem<Wry>,
+    voice_mute: CheckMenuItem<Wry>,
+    voice_deafen: CheckMenuItem<Wry>,
+    voice_disconnect: MenuItem<Wry>,
+    status_online: CheckMenuItem<Wry>,
+    status_away: CheckMenuItem<Wry>,
+    status_dnd: CheckMenuItem<Wry>,
+    status_offline: CheckMenuItem<Wry>,
+    check_updates: MenuItem<Wry>,
 }
 
 #[derive(Default)]
@@ -848,7 +848,7 @@ fn native_screenshare_bitrate(preset: &str, fps: u32) -> u64 {
 
 #[cfg(target_os = "windows")]
 fn list_native_audio_input_devices_inner() -> Result<Vec<NativeAudioInputDevice>, String> {
-    initialize_mta().map_err(|err| err.to_string())?;
+    initialize_mta().ok().map_err(|err| err.to_string())?;
     let enumerator = DeviceEnumerator::new().map_err(|err| err.to_string())?;
     let devices = enumerator
         .get_device_collection(&AudioDirection::Capture)
