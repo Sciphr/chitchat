@@ -233,6 +233,14 @@ mod webrtc {
             meson.arg(format!("-Dcpp_link_args={}", link_args));
         }
 
+        if cfg!(target_os = "windows") {
+            let vscrt = match env::var("PROFILE").ok().as_deref() {
+                Some("debug") => "mtd",
+                _ => "mt",
+            };
+            meson.arg(format!("-Db_vscrt={vscrt}"));
+        }
+
         let status = meson
             .arg("-Ddefault_library=static")
             .arg("-Dcpp_std=c++20")
@@ -264,8 +272,6 @@ mod webrtc {
             print_meson_log_tail(&build_dir);
         }
         assert!(status.success(), "Command failed: {:?}", &install);
-
-        create_windows_link_aliases(&build_dir, &install_dir)?;
 
         Ok(())
     }
@@ -349,13 +355,6 @@ mod webrtc {
         lib_dirs: &[PathBuf],
         prefix: &str,
     ) -> Result<Vec<String>> {
-        if cfg!(target_os = "windows") {
-            println!(
-                "cargo:warning=Skipping webrtc-audio-processing symbol prefixing on Windows bundled builds."
-            );
-            return Ok(vec![]);
-        }
-
         let static_lib_filename = format!("lib{LIB_NAME}.a");
 
         for lib_dir in lib_dirs {
@@ -363,6 +362,10 @@ mod webrtc {
             if lib_path.exists() {
                 let symbols = get_defined_symbols(&lib_path)?;
                 prefix_archive_symbols(&lib_path, &symbols, prefix)?;
+                create_windows_link_aliases(
+                    &bundled_work_dir().join(BUNDLED_BUILD_PATH),
+                    &out_dir(),
+                )?;
                 return Ok(symbols);
             }
         }
@@ -447,15 +450,16 @@ mod webrtc {
 
     /// Extract defined (non-external) symbols from a static library using nm.
     fn get_defined_symbols(archive_path: &std::path::Path) -> Result<Vec<String>> {
-        let output = Command::new("nm")
+        let nm = determine_nm_path()?;
+        let output = Command::new(&nm)
             .arg("--defined-only")
             .arg("--format=posix")
             .arg(archive_path)
             .output()
-            .context("Failed to execute nm")?;
+            .context(format!("Failed to execute {:?}", nm))?;
 
         if !output.status.success() {
-            anyhow::bail!("nm failed: {}", String::from_utf8_lossy(&output.stderr));
+            anyhow::bail!("{:?} failed: {}", nm, String::from_utf8_lossy(&output.stderr));
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -554,7 +558,7 @@ fn main() -> Result<()> {
     cc_build.cpp(true).file("src/wrapper.cpp").includes(&include_dirs);
 
     if cc_build.get_compiler().is_like_msvc() {
-        cc_build.flag("/std:c++20").flag("/wd4100");
+        cc_build.static_crt(true).flag("/std:c++20").flag("/wd4100");
     } else {
         cc_build.flag("-std=c++20").flag("-Wno-unused-parameter");
     }
@@ -635,8 +639,24 @@ fn configure_libclang_path() {
     }
 }
 
+fn determine_nm_path() -> Result<PathBuf> {
+    if let Some(path) = determine_llvm_tool_path("llvm-nm") {
+        return Ok(path);
+    }
+
+    Ok(if cfg!(target_os = "windows") {
+        PathBuf::from("llvm-nm.exe")
+    } else {
+        PathBuf::from("nm")
+    })
+}
+
 /// Reliably determine a path to objcopy binary bundled with the active Rust toolchain (rust-objcopy)
 fn determine_objcopy_path() -> Result<PathBuf> {
+    if let Some(path) = determine_llvm_tool_path("llvm-objcopy") {
+        return Ok(path);
+    }
+
     // 1. Get the rustc command (this might be a path or just "rustc")
     let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
 
@@ -667,4 +687,32 @@ fn determine_objcopy_path() -> Result<PathBuf> {
     }
 
     Ok(objcopy)
+}
+
+fn determine_llvm_tool_path(tool_name: &str) -> Option<PathBuf> {
+    let executable = if cfg!(target_os = "windows") {
+        format!("{tool_name}.exe")
+    } else {
+        tool_name.to_string()
+    };
+
+    if let Some(path) = env::var_os("LIBCLANG_PATH") {
+        let candidate = PathBuf::from(path).join(&executable);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    for candidate_dir in [
+        r"C:\Program Files\LLVM\bin",
+        r"C:\Program Files (x86)\LLVM\bin",
+    ] {
+        let candidate = PathBuf::from(candidate_dir).join(&executable);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    None
 }
