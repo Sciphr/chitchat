@@ -42,11 +42,6 @@ use wasapi::{
     initialize_mta, DeviceEnumerator, Direction as AudioDirection, SampleType, StreamMode,
     WaveFormat,
 };
-#[cfg(target_os = "windows")]
-use webrtc_audio_processing::{
-    config::{EchoCanceller, HighPassFilter, NoiseSuppression, NoiseSuppressionLevel},
-    Config as AudioProcessingConfig, Processor as AudioProcessor,
-};
 
 #[derive(Serialize)]
 #[serde(tag = "kind")]
@@ -684,7 +679,6 @@ struct NativeMicrophoneSession {
     track: LocalAudioTrack,
     audio_task: JoinHandle<()>,
     capture_thread: ThreadJoinHandle<()>,
-    render_thread: Option<ThreadJoinHandle<()>>,
     stop_tx: watch::Sender<bool>,
     muted: Arc<AtomicBool>,
 }
@@ -886,162 +880,8 @@ fn resolve_capture_device(
 }
 
 #[cfg(target_os = "windows")]
-fn noise_suppression_level(mode: &str) -> Option<NoiseSuppressionLevel> {
-    match mode {
-        "off" => None,
-        "aggressive" => Some(NoiseSuppressionLevel::VeryHigh),
-        "rnnoise" => Some(NoiseSuppressionLevel::High),
-        _ => Some(NoiseSuppressionLevel::Moderate),
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn create_audio_processor(mode: &str) -> Result<Arc<AudioProcessor>, String> {
-    let processor = AudioProcessor::new(48_000).map_err(|err| err.to_string())?;
-    let config = AudioProcessingConfig {
-        echo_canceller: Some(EchoCanceller::default()),
-        high_pass_filter: Some(HighPassFilter::default()),
-        noise_suppression: noise_suppression_level(mode).map(|level| NoiseSuppression {
-            level,
-            analyze_linear_aec_output: false,
-        }),
-        ..Default::default()
-    };
-    processor.set_config(config);
-    Ok(Arc::new(processor))
-}
-
-#[cfg(target_os = "windows")]
-fn analyze_loopback_chunk(processor: &AudioProcessor, chunk: &[u8]) {
-    const SAMPLES_PER_CHANNEL: usize = 480;
-    const CHANNELS: usize = 2;
-    let mut left = vec![0.0f32; SAMPLES_PER_CHANNEL];
-    let mut right = vec![0.0f32; SAMPLES_PER_CHANNEL];
-    for frame_idx in 0..SAMPLES_PER_CHANNEL {
-        let base = frame_idx * CHANNELS * 2;
-        if base + 3 >= chunk.len() {
-            break;
-        }
-        left[frame_idx] = i16::from_le_bytes([chunk[base], chunk[base + 1]]) as f32 / 32768.0;
-        right[frame_idx] = i16::from_le_bytes([chunk[base + 2], chunk[base + 3]]) as f32 / 32768.0;
-    }
-    let _ = processor.analyze_render_frame([left.as_slice(), right.as_slice()]);
-}
-
-#[cfg(target_os = "windows")]
-fn start_native_render_analysis(
-    processor: Arc<AudioProcessor>,
-    stop_rx: watch::Receiver<bool>,
-) -> Result<ThreadJoinHandle<()>, String> {
-    std::thread::Builder::new()
-        .name("native-voice-render".to_string())
-        .spawn(move || {
-            const SAMPLE_RATE: u32 = 48_000;
-            const CHANNELS: usize = 2;
-            const SAMPLES_PER_CHANNEL: usize = 480;
-            if initialize_mta().is_err() {
-                return;
-            }
-            let enumerator = match DeviceEnumerator::new() {
-                Ok(value) => value,
-                Err(_) => return,
-            };
-            let device = match enumerator.get_default_device(&AudioDirection::Render) {
-                Ok(value) => value,
-                Err(_) => return,
-            };
-            let mut audio_client = match device.get_iaudioclient() {
-                Ok(value) => value,
-                Err(_) => return,
-            };
-            let desired_format = WaveFormat::new(
-                16,
-                16,
-                &SampleType::Int,
-                SAMPLE_RATE as usize,
-                CHANNELS,
-                None,
-            );
-            let (_, min_time) = match audio_client.get_device_period() {
-                Ok(value) => value,
-                Err(_) => return,
-            };
-            let mode = StreamMode::EventsShared {
-                autoconvert: true,
-                buffer_duration_hns: min_time,
-            };
-            if audio_client
-                .initialize_client(&desired_format, &AudioDirection::Capture, &mode)
-                .is_err()
-            {
-                return;
-            }
-            let h_event = match audio_client.set_get_eventhandle() {
-                Ok(value) => value,
-                Err(_) => return,
-            };
-            let capture_client = match audio_client.get_audiocaptureclient() {
-                Ok(value) => value,
-                Err(_) => return,
-            };
-            if audio_client.start_stream().is_err() {
-                return;
-            }
-
-            let mut local_stop_rx = stop_rx;
-            let mut byte_queue: VecDeque<u8> = VecDeque::new();
-            let chunk_bytes = SAMPLES_PER_CHANNEL * CHANNELS * 2;
-            loop {
-                if *local_stop_rx.borrow() {
-                    let _ = audio_client.stop_stream();
-                    break;
-                }
-
-                let new_frames = match capture_client.get_next_packet_size() {
-                    Ok(Some(value)) => value,
-                    Ok(None) => 0,
-                    Err(_) => {
-                        let _ = audio_client.stop_stream();
-                        break;
-                    }
-                };
-                if new_frames > 0 {
-                    let additional = (new_frames as usize * CHANNELS * 2)
-                        .saturating_sub(byte_queue.capacity().saturating_sub(byte_queue.len()));
-                    byte_queue.reserve(additional);
-                    if capture_client
-                        .read_from_device_to_deque(&mut byte_queue)
-                        .is_err()
-                    {
-                        let _ = audio_client.stop_stream();
-                        break;
-                    }
-                }
-
-                while byte_queue.len() >= chunk_bytes {
-                    let mut chunk = vec![0u8; chunk_bytes];
-                    for byte in chunk.iter_mut() {
-                        *byte = byte_queue.pop_front().unwrap_or_default();
-                    }
-                    analyze_loopback_chunk(&processor, &chunk);
-                }
-
-                if h_event.wait_for_event(1000).is_err() {
-                    let _ = audio_client.stop_stream();
-                    break;
-                }
-                if local_stop_rx.has_changed().unwrap_or(false) {
-                    let _ = local_stop_rx.borrow_and_update();
-                }
-            }
-        })
-        .map_err(|err| err.to_string())
-}
-
-#[cfg(target_os = "windows")]
 fn start_native_microphone_capture(
     rtc_source: NativeAudioSource,
-    processor: Arc<AudioProcessor>,
     mode: String,
     input_sensitivity: f32,
     device_id: Option<String>,
@@ -1170,23 +1010,14 @@ fn start_native_microphone_capture(
                 }
 
                 while byte_queue.len() >= chunk_bytes {
-                    let mut capture_frame = vec![0.0f32; SAMPLES_PER_CHANNEL];
-                    for sample in &mut capture_frame {
+                    let mut processed = vec![0.0f32; SAMPLES_PER_CHANNEL];
+                    for sample in &mut processed {
                         let b0 = byte_queue.pop_front().unwrap_or_default();
                         let b1 = byte_queue.pop_front().unwrap_or_default();
                         let b2 = byte_queue.pop_front().unwrap_or_default();
                         let b3 = byte_queue.pop_front().unwrap_or_default();
                         *sample = f32::from_le_bytes([b0, b1, b2, b3]).clamp(-1.0, 1.0);
                     }
-
-                    let mut channels = vec![capture_frame];
-                    if processor
-                        .process_capture_frame(channels.iter_mut())
-                        .is_err()
-                    {
-                        continue;
-                    }
-                    let processed = &channels[0];
                     let rms = processed.iter().map(|sample| sample * sample).sum::<f32>()
                         / (SAMPLES_PER_CHANNEL as f32);
                     let rms = rms.sqrt();
@@ -1248,7 +1079,6 @@ fn start_native_microphone_capture(
 #[cfg(not(target_os = "windows"))]
 fn start_native_microphone_capture(
     _rtc_source: NativeAudioSource,
-    _processor: Arc<()>,
     _mode: String,
     _input_sensitivity: f32,
     _device_id: Option<String>,
@@ -1661,9 +1491,6 @@ async fn stop_native_microphone_inner(manager: &NativeMicrophoneManager) -> Resu
         let _ = session.stop_tx.send(true);
         let _ = session.audio_task.await;
         let _ = session.capture_thread.join();
-        if let Some(render_thread) = session.render_thread {
-            let _ = render_thread.join();
-        }
         session.room.close().await.map_err(|err| err.to_string())?;
     }
     Ok(())
@@ -1692,7 +1519,6 @@ async fn start_native_microphone(
     {
         stop_native_microphone_inner(&manager).await?;
 
-        let processor = create_audio_processor(&options.noise_suppression_mode)?;
         let (room, _events) =
             Room::connect(&options.livekit_url, &options.token, RoomOptions::default())
                 .await
@@ -1721,11 +1547,8 @@ async fn start_native_microphone(
             track.mute();
         }
 
-        let render_thread =
-            start_native_render_analysis(processor.clone(), stop_tx.subscribe()).ok();
         let (audio_task, capture_thread) = start_native_microphone_capture(
             rtc_source,
-            processor,
             options.noise_suppression_mode.clone(),
             options.input_sensitivity,
             options.device_id.clone(),
@@ -1738,7 +1561,6 @@ async fn start_native_microphone(
             track,
             audio_task,
             capture_thread,
-            render_thread,
             stop_tx,
             muted,
         };
