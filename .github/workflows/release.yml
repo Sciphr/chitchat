@@ -36,6 +36,11 @@ jobs:
       - name: Force MSVC for bundled native builds
         shell: pwsh
         run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $msvcRoot = Get-ChildItem (Join-Path $vsPath 'VC\Tools\MSVC') | Sort-Object Name -Descending | Select-Object -First 1
+          $msvcBin = Join-Path $msvcRoot.FullName 'bin\Hostx64\x64'
+          $msvcBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "CC=cl" >> $env:GITHUB_ENV
           "CXX=cl" >> $env:GITHUB_ENV
           "AR=lib" >> $env:GITHUB_ENV

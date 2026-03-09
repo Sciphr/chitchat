@@ -141,6 +141,7 @@ mod webrtc {
     use std::{
         collections::HashSet,
         fs,
+        io::{BufRead, BufReader},
         path::{Path, PathBuf},
         process::Command,
     };
@@ -209,8 +210,15 @@ mod webrtc {
         let install_dir = out_dir();
         let source_dir = bundled_source_dir();
 
-        if !source_dir.exists() {
-            copy_dir_recursively(&vendor_source_dir, &source_dir)?;
+        if source_dir.exists() {
+            fs::remove_dir_all(&source_dir)
+                .with_context(|| format!("Failed to remove {}", source_dir.display()))?;
+        }
+        copy_dir_recursively(&vendor_source_dir, &source_dir)?;
+
+        if build_dir.exists() {
+            fs::remove_dir_all(&build_dir)
+                .with_context(|| format!("Failed to remove {}", build_dir.display()))?;
         }
 
         fs::create_dir_all(&build_dir)?;
@@ -218,7 +226,6 @@ mod webrtc {
 
         let mut meson = Command::new("meson");
         meson.args(["setup", "--prefix", install_dir.to_str().unwrap()]);
-        meson.arg("--reconfigure");
 
         if cfg!(target_os = "macos") {
             let link_args = "['-framework', 'CoreFoundation', '-framework', 'Foundation']";
@@ -228,6 +235,7 @@ mod webrtc {
 
         let status = meson
             .arg("-Ddefault_library=static")
+            .arg("-Dcpp_std=c++20")
             .arg(source_dir.to_str().unwrap())
             .arg(build_dir.to_str().unwrap())
             .status()
@@ -237,16 +245,24 @@ mod webrtc {
         let mut ninja = Command::new("ninja");
         let status = ninja
             .current_dir(&build_dir)
+            .arg("-v")
             .status()
             .context("Failed to execute ninja. Do you have it installed?")?;
+        if !status.success() {
+            print_meson_log_tail(&build_dir);
+        }
         assert!(status.success(), "Command failed: {:?}", &ninja);
 
         let mut install = Command::new("ninja");
         let status = install
             .current_dir(&build_dir)
+            .arg("-v")
             .arg("install")
             .status()
             .context("Failed to execute ninja install")?;
+        if !status.success() {
+            print_meson_log_tail(&build_dir);
+        }
         assert!(status.success(), "Command failed: {:?}", &install);
 
         Ok(())
@@ -258,6 +274,13 @@ mod webrtc {
         lib_dirs: &[PathBuf],
         prefix: &str,
     ) -> Result<Vec<String>> {
+        if cfg!(target_os = "windows") {
+            println!(
+                "cargo:warning=Skipping webrtc-audio-processing symbol prefixing on Windows bundled builds."
+            );
+            return Ok(vec![]);
+        }
+
         let static_lib_filename = format!("lib{LIB_NAME}.a");
 
         for lib_dir in lib_dirs {
@@ -325,6 +348,26 @@ mod webrtc {
         }
 
         Ok(())
+    }
+
+    fn print_meson_log_tail(build_dir: &Path) {
+        let log_path = build_dir.join("meson-logs").join("meson-log.txt");
+        let Ok(file) = fs::File::open(&log_path) else {
+            eprintln!("Meson log not found at {}", log_path.display());
+            return;
+        };
+
+        let lines = BufReader::new(file)
+            .lines()
+            .map_while(Result::ok)
+            .collect::<Vec<_>>();
+
+        let start = lines.len().saturating_sub(200);
+        eprintln!("--- meson-log.txt (last {} lines) ---", lines.len() - start);
+        for line in &lines[start..] {
+            eprintln!("{line}");
+        }
+        eprintln!("--- end meson-log.txt ---");
     }
 
     /// Extract defined (non-external) symbols from a static library using nm.
@@ -437,7 +480,7 @@ fn main() -> Result<()> {
         .cpp(true)
         .file("src/wrapper.cpp")
         .includes(&include_dirs)
-        .flag("-std=c++17")
+        .flag("-std=c++20")
         .flag("-Wno-unused-parameter")
         .out_dir(out_dir())
         .compile("webrtc_audio_processing_wrapper");
@@ -447,6 +490,7 @@ fn main() -> Result<()> {
     // build.rs is always included and doesn't have to be specified.
     println!("cargo:rerun-if-changed=src/wrapper.hpp");
     println!("cargo:rerun-if-changed=src/wrapper.cpp");
+    println!("cargo:rerun-if-changed=webrtc-audio-processing");
 
     // Prefix the wrapper library's references to webrtc symbols to match the renamed webrtc library.
     let wrapper_lib = out_dir().join("libwebrtc_audio_processing_wrapper.a");
@@ -464,7 +508,7 @@ fn main() -> Result<()> {
     let binding_file = out_dir().join("bindings.rs");
     let mut builder = bindgen::Builder::default()
         .header("src/wrapper.hpp")
-        .clang_args(&["-x", "c++", "-std=c++17", "-fparse-all-comments"])
+        .clang_args(&["-x", "c++", "-std=c++20", "-fparse-all-comments"])
         .generate_comments(true)
         .enable_cxx_namespaces();
 
